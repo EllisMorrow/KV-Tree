@@ -54,7 +54,10 @@ class MonitorScopeTests(unittest.TestCase):
 
         handler.process_event("modified", selected)
         self.assertEqual(len(dispatcher.tasks), 1)
-        self.assertEqual(dispatcher.tasks[0][2], os.path.normcase(os.path.abspath(selected)))
+        self.assertEqual(
+            dispatcher.tasks[0][2],
+            os.path.normcase(os.path.realpath(os.path.abspath(selected))),
+        )
 
     def test_enabled_folder_queues_markdown_within_its_tree(self):
         folder = os.path.join(self.root, "notes")
