@@ -4,6 +4,8 @@
 import json
 import os
 
+from src.utils.file_utils import atomic_write_json
+
 DEFAULT_RULES = r"""
 [排除规则]
 ; 每行一个正则表达式，匹配到的整行内容都将被忽略
@@ -30,6 +32,9 @@ class ConfigManager:
                 "auto_generate": True
             },
             "output_selection": {},
+            "blacklist": [],
+            "logseq_exclude_keys": [],
+            "_logseq_seen_defaults": [],
             "window_geometry": ""
         }
 
@@ -65,6 +70,11 @@ class ConfigManager:
             
             # 加载输出选择，如果不存在则使用默认值
             self.config["output_selection"] = loaded_config.get("output_selection", {})
+
+            # 兼容旧配置：这些字段首次引入前保存的文件没有它们。
+            self.config["blacklist"] = loaded_config.get("blacklist", [])
+            self.config["logseq_exclude_keys"] = loaded_config.get("logseq_exclude_keys", [])
+            self.config["_logseq_seen_defaults"] = loaded_config.get("_logseq_seen_defaults", [])
             
             # 加载窗口大小与位置
             self.config["window_geometry"] = loaded_config.get("window_geometry", "")
@@ -82,7 +92,10 @@ class ConfigManager:
             "rules": app_data.get("rules", DEFAULT_RULES),
             "advanced_options": app_data.get("advanced_options", {}),
             "output_selection": app_data.get("output_selection", {}),
+            "blacklist": app_data.get("blacklist", []),
+            "logseq_exclude_keys": app_data.get("logseq_exclude_keys", []),
+            "_logseq_seen_defaults": app_data.get("_logseq_seen_defaults", []),
             "window_geometry": app_data.get("window_geometry", "")
         }
-        with open(self.config_file, "w", encoding="utf-8") as f:
-            json.dump(config_to_save, f, indent=4)
+        atomic_write_json(self.config_file, config_to_save, ensure_ascii=False, indent=4)
+        self.config = config_to_save

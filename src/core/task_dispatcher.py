@@ -89,6 +89,8 @@ class TaskDispatcher:
                                                     rules=rules, adv_opts=adv_opts,
                                                     output_path_base=output_path_base,
                                                     logseq_exclude_keys=logseq_exclude_keys)
+            if new is None:
+                continue
             dirty_outputs.update(old.keys())
             dirty_outputs.update(new.keys())
             
@@ -285,7 +287,13 @@ class TaskDispatcher:
             if output_path_base is None: output_path_base = self.state.get_output_path()
             if logseq_exclude_keys is None: logseq_exclude_keys = self.state.get_logseq_exclude_keys()
 
-            new = self._parse_single_file_stateless(path, rules, adv_opts, output_path_base, logseq_exclude_keys)
+            try:
+                new = self._parse_single_file_stateless(path, rules, adv_opts, output_path_base, logseq_exclude_keys)
+            except Exception as e:
+                print(f"Error parsing {path}: {e}")
+                # None is distinct from a valid empty parse result. The batch
+                # caller skips output regeneration, preserving cache and files.
+                return old, None
             self.cache_manager.update_entry(path, os.path.getmtime(path), new)
         return old, new
 
@@ -293,30 +301,43 @@ class TaskDispatcher:
     def _parse_single_file_stateless(file_path: str, rules: list, adv_opts: dict, output_path_base: str, logseq_exclude_keys: set) -> dict:
         """
         Pure function for parsing a single file. Safe to run in a thread pool.
+
+        Parsing errors intentionally propagate so callers can preserve the last
+        successful cache instead of confusing a failure with a valid empty result.
         """
         outputs = {}
-        try:
-            with open(file_path, "r", encoding="utf-8") as f: content = f.read()
-            # Instantiate fresh parsers to avoid thread state corruption
-            parser = AstParser()
-            res, _ = parser.parse(content, rules=rules)
-            
-            for lib, entries in res.items(): outputs[os.path.join(output_path_base, lib)] = "\n".join(entries)
-            
-            if adv_opts.get("logseq_scan_keys") or adv_opts.get("logseq_scan_values") or adv_opts.get("logseq_scan_pure_values"):
-                logseq_parser = LogseqParser(
-                    scan_keys=adv_opts.get("logseq_scan_keys", False),
-                    scan_values=adv_opts.get("logseq_scan_values", False),
-                    scan_pure_values=adv_opts.get("logseq_scan_pure_values", False),
-                    exclude_keys=logseq_exclude_keys
-                )
-                logseq_res = logseq_parser.parse_file_content(content)
-                if logseq_res:
-                    out_path = os.path.join(output_path_base, "Logseq属性键值.md")
-                    existing = set(outputs.get(out_path, "").splitlines()); existing.update(logseq_res)
-                    outputs[out_path] = "\n".join(sorted(list(existing)))
-        except Exception as e: print(f"Error parsing {file_path}: {e}")
+        with open(file_path, "r", encoding="utf-8") as f: content = f.read()
+        # Instantiate fresh parsers to avoid thread state corruption
+        parser = AstParser()
+        res, _ = parser.parse(content, rules=rules)
+
+        for lib, entries in res.items(): outputs[os.path.join(output_path_base, lib)] = "\n".join(entries)
+
+        if adv_opts.get("logseq_scan_keys") or adv_opts.get("logseq_scan_values") or adv_opts.get("logseq_scan_pure_values"):
+            logseq_parser = LogseqParser(
+                scan_keys=adv_opts.get("logseq_scan_keys", False),
+                scan_values=adv_opts.get("logseq_scan_values", False),
+                scan_pure_values=adv_opts.get("logseq_scan_pure_values", False),
+                exclude_keys=logseq_exclude_keys
+            )
+            logseq_res = logseq_parser.parse_file_content(content)
+            if logseq_res:
+                out_path = os.path.join(output_path_base, "Logseq属性键值.md")
+                existing = set(outputs.get(out_path, "").splitlines()); existing.update(logseq_res)
+                outputs[out_path] = "\n".join(sorted(list(existing)))
         return outputs
+
+    @staticmethod
+    def _is_output_path_within_root(output_path, output_root):
+        if not output_path or not output_root:
+            return False
+        try:
+            root = os.path.normcase(os.path.realpath(os.path.abspath(output_root)))
+            target = os.path.normcase(os.path.realpath(os.path.abspath(output_path)))
+            return target != root and os.path.commonpath((root, target)) == root
+        except (OSError, ValueError):
+            # ValueError also covers different Windows drives.
+            return False
 
     def _update_single_output_file(self, output_path):
         all_lines = set()
@@ -332,6 +353,12 @@ class TaskDispatcher:
             base_dest = self.state.get_output_path()
             if not base_dest or base_dest == os.getcwd():
                 self.state.add_active_output(os.path.join("<仅缓存,未设输出目录>", basename), "多元")
+                return
+
+            # Cached paths are untrusted too: never write/delete outside the
+            # configured output root, even if a malformed label reached cache.
+            if not self._is_output_path_within_root(output_path, base_dest):
+                print(f"Refusing output path outside configured root: {output_path}")
                 return
                 
             # Check the blacklist first! If blacklisted, block everything.
@@ -363,10 +390,11 @@ class TaskDispatcher:
         except Exception as e: print(f"Error writing {output_path}: {e}")
 
     def _get_all_source_files(self):
-        paths = []
+        paths = set()
         sources = self.state.get_source_files()
         for path, data in sources.items():
             if not data.get("enabled"): continue
-            if data.get("type") == "folder": paths.extend(data.get("files", {}).keys())
-            else: paths.append(path)
-        return paths
+            source_paths = data.get("files", {}).keys() if data.get("type") == "folder" else (path,)
+            for source_path in source_paths:
+                paths.add(os.path.normcase(os.path.realpath(os.path.abspath(source_path))))
+        return list(paths)

@@ -1,6 +1,16 @@
 import re
 from collections import defaultdict
 
+
+def _safe_library_filename(library_name: str):
+    """Return a safe output filename, or None for path-like/invalid labels."""
+    library_name = library_name.strip()
+    if not library_name or ".." in library_name:
+        return None
+    if any(char in library_name for char in '/\\<>:"|?*\0'):
+        return None
+    return f"#KV树-{library_name}.md"
+
 class Node:
     """
     表示 AST 中的一个节点，对应于源文本中的一行。
@@ -19,8 +29,11 @@ class Node:
         match = tag_pattern.search(self.raw_line.strip())
         if match:
             gd = match.groupdict()
+            library_filename = _safe_library_filename(gd['lib'])
+            if library_filename is None:
+                return self.raw_line.strip().lstrip('- ').strip()
             self.tag = {
-                'lib': f"#KV树-{gd['lib']}.md",
+                'lib': library_filename,
                 'mode': gd['mode']
             }
             # 返回移除了标签和前导 `- ` 的内容

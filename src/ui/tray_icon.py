@@ -37,7 +37,10 @@ class AppTrayIcon:
         if self.icon:
             self.icon.stop()
 
-    def toggle_window(self):
+    def toggle_window(self, icon=None, item=None):
+        self.app_ui.call_on_ui_thread(self._toggle_window_on_ui_thread)
+
+    def _toggle_window_on_ui_thread(self):
         if self.app_ui.state() == "normal": 
             self.app_ui.withdraw()
         else: 
@@ -45,6 +48,6 @@ class AppTrayIcon:
             self.app_ui.lift()
             self.app_ui.focus_force()
 
-    def on_closing_from_tray(self):
-        self.app_ui.on_closing(from_tray=True)
+    def on_closing_from_tray(self, icon=None, item=None):
+        self.app_ui.call_on_ui_thread(self.app_ui.on_closing, from_tray=True)
 

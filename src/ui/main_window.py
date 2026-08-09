@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
+import queue
 import sys
 import webbrowser
 import ctypes
@@ -14,21 +15,24 @@ except ImportError:
     winreg = None
 
 class KvTreeAppUI(tk.Tk):
-    VERSION = "1.2.1"
+    VERSION = "1.2.2"
 
     def __init__(self, app_state, task_dispatcher, file_monitor):
         super().__init__()
         self.app_state = app_state
         self.dispatcher = task_dispatcher
         self.file_monitor = file_monitor
+        self._ui_callback_queue = queue.Queue()
+        self.after(25, self._drain_ui_callbacks)
         
-        # Setup UI callbacks
+        # The dispatcher and file monitor use worker threads.  Marshal every
+        # UI callback through Tk's event loop, including dialogs.
         self.dispatcher.ui_cb = {
-            'set_status': self.set_status,
-            'update_progress': self.update_progress,
-            'update_lists': self.update_lists,
-            'folder_scanned': self._show_scan_results_and_add,
-            'show_error': self.show_error
+            'set_status': self._on_ui_thread(self.set_status),
+            'update_progress': self._on_ui_thread(self.update_progress),
+            'update_lists': self._on_ui_thread(self.update_lists),
+            'folder_scanned': self._on_ui_thread(self._show_scan_results_and_add),
+            'show_error': self._on_ui_thread(self.show_error)
         }
         self.file_monitor.ui_cb = self.dispatcher.ui_cb
 
@@ -336,7 +340,34 @@ class KvTreeAppUI(tk.Tk):
         # Link label for github help
         github_lbl = ttk.Label(btn_frame, text="❓ 帮助与更新 (GitHub)", foreground="#0078D4", cursor="hand2")
         github_lbl.pack(side=tk.LEFT)
-        github_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/msjsc001/KV-Tree"))
+        github_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/EllisMorrow/KV-Tree"))
+
+    def _on_ui_thread(self, callback):
+        """Wrap callbacks invoked by worker threads for Tk-safe execution."""
+        def schedule_callback(*args, **kwargs):
+            self.call_on_ui_thread(callback, *args, **kwargs)
+        return schedule_callback
+
+    def call_on_ui_thread(self, callback, *args, **kwargs):
+        """Queue work without calling any Tk API from a worker thread."""
+        self._ui_callback_queue.put((callback, args, kwargs))
+
+    def _drain_ui_callbacks(self):
+        """Execute queued callbacks exclusively from Tk's main event loop."""
+        while True:
+            try:
+                callback, args, kwargs = self._ui_callback_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback(*args, **kwargs)
+            except Exception:
+                self.report_callback_exception(*sys.exc_info())
+        try:
+            self.after(25, self._drain_ui_callbacks)
+        except tk.TclError:
+            # A queued close callback may have destroyed the root window.
+            pass
 
     def save_settings_from_tab(self):
         # Rules and logseq_exclude_keys are now saved instantly when their respective dialogs close.
@@ -667,9 +698,12 @@ class KvTreeAppUI(tk.Tk):
             if is_folder:
                 choice = messagebox.askquestion("清理选项", "您移除了文件夹，清理全量缓存吗？\n(是：推荐 / 否：缓释)", type=messagebox.YESNOCANCEL)
                 if choice == 'yes': self.dispatcher.put_task(("clear_cache",))
-                elif choice == 'no': self.dispatcher.put_task(("initialize",)) 
+                else: self.dispatcher.put_task(("initialize",))
             else:
-                self.dispatcher.put_task(("process_file", "deleted", selected_id))
+                # The source still exists on disk, so a synthetic filesystem
+                # deletion would be treated as a modification. Reconcile the
+                # source set instead so its cached contributions are removed.
+                self.dispatcher.put_task(("initialize",))
             self.set_status(f"'{os.path.basename(selected_id)}' 已移除。")
             self._restart_monitor_if_auto()
             if hasattr(self, 'trigger_save_cb'): self.trigger_save_cb()
