@@ -2,15 +2,15 @@
 
 <img alt="image" src="https://github.com/user-attachments/assets/88227df4-11f8-4e5b-bd1c-5e598b8a6b36" />
 
-KVTree (KVT) 是一款强大的桌面端效率工具，专为 [QuickKV (QKV)](https://github.com/msjsc001/QuickKV) 用户设计。它允许您在**任何 Markdown 笔记软件**（如 Obsidian、Logseq、Typora）中，通过直观的无序列表（大纲）树来优雅地管理海量词库。
+KVTree (KVT) 是一款桌面端效率工具，专为 [QuickKV (QKV)](https://github.com/EllisMorrow/QuickKV) 用户设计。它允许您在 Markdown 笔记软件（如 Obsidian、Logseq、Typora）中，通过无序列表（大纲）树管理词库。
 
 KVT 会在后台静默运行，自动将您笔记中的大纲结构实时编译为 QuickKV 标准词库并输出到指定目录。无论是十几个词条还是百万量级的海量数据，**KVTree 都能让您对“词库里到底有什么词”了如指掌**。
 
 
 <p align="center">
-  <a href="https://github.com/msjsc001/KV-Tree/releases/latest"><img src="https://img.shields.io/github/v/release/msjsc001/KV-Tree"></a>
-  <a href="https://github.com/msjsc001/KV-Tree/commits/master"><img src="https://img.shields.io/github/last-commit/msjsc001/KV-Tree"></a>
-  <a href="https://github.com/msjsc001/KV-Tree/releases"><img src="https://img.shields.io/github/downloads/msjsc001/KV-Tree/total?label=Downloads&color=brightgreen"></a>
+  <a href="https://github.com/EllisMorrow/KV-Tree/releases/latest"><img src="https://img.shields.io/github/v/release/EllisMorrow/KV-Tree"></a>
+  <a href="https://github.com/EllisMorrow/KV-Tree/commits/main"><img src="https://img.shields.io/github/last-commit/EllisMorrow/KV-Tree/main"></a>
+  <a href="https://github.com/EllisMorrow/KV-Tree/releases"><img src="https://img.shields.io/github/downloads/EllisMorrow/KV-Tree/total?label=Downloads&color=brightgreen"></a>
 </p>
 
 <p align="center">
@@ -24,8 +24,8 @@ KVT 会在后台静默运行，自动将您笔记中的大纲结构实时编译�
 - **⚡ 无感热更新**：开启自动监控后，您在 Obsidian/Logseq 按下 `Ctrl+S` 的瞬间，KVTree 会在后台亚秒级完成增量扫描，并将最新词库同步完毕。
 - **⚙️ 双引擎过滤控制面板**: 独家原创的“内容剔除”与“整行屏蔽”双选面板，取代老旧的繁琐输入框。支持一行一行分离并配置专属正则黑名单，像剥洋葱一样剥除您笔记中的废话！
 - **💻 无级平滑体验**: 原生级渲染系统支持通过鼠标滚轮无限滑动超大数据集列表，并能在关掉后自动记忆您的偏好窗口大小，无需反复拖拽。
-- **🌲 智能 AST 树形解析**：摒弃粗暴的正则匹配，采用先进的抽象语法树 (AST) 算法。完美识别 `单行`、`父与子`、`不包含父` 三种复杂的提取逻辑，保证词库结构 100% 还原您的笔记逻辑。
-- **🛡️ 生产级数据安全**：**原子级写入技术**确保即便在生成词库的瞬间遭遇突发断电，也绝不会导致词库文件损坏或变成 0KB。
+- **🌲 智能 AST 树形解析**：通过树形结构识别 `单行`、`父与子`、`不包含父` 三种提取逻辑。
+- **🛡️ 安全写入与路径约束**：输出、配置和缓存采用同目录临时文件替换；所有生成与删除操作都会校验目标仍位于用户选择的输出目录内。
 - **🎨 现代化 Fluent 交互设计**：完全摒弃传统丑陋的开源脚本界面。全面引入微软 Fluent Design 设计语言，双标签页布局，带有详尽的悬浮提示帮助（Tips），真正实现“小白式”体验。
 - **🔎 支持 Logseq md 版键值识别**：独家支持页面**任意位置**的属性键与值扫描（如键 `keys::` 和值 `[[values]]`），让 Logseq 用户的属性键或带双方的值也能瞬间转化为 QKV 高频词条，方便复用 Logseq md的键值。
 
@@ -58,7 +58,7 @@ KVT 会在后台静默运行，自动将您笔记中的大纲结构实时编译�
 ### 第 2 步：一键生成
 1. 运行 `kv_tree_app.py` 启动 KVT 控制台界面。
 2. **添加笔记源**：点击“添加文件”或“添加文件夹”，将刚才的 `待办事项.md`（或您整个笔记库文件夹）加入左侧监控列表。
-3. **设置输出目录**：建议直接选择 [QuickKV](https://github.com/msjsc001/QuickKV) 软件本体下的自动载入文件夹。
+3. **设置输出目录**：建议直接选择 [QuickKV](https://github.com/EllisMorrow/QuickKV) 软件本体下的自动载入文件夹。
 4. **启动引擎**：点击【🚀 立即全量扫描并重建词库】！
 
 不出 2 秒，您的指定目录下就会完美生成两个崭新的纯文本词库文件，它们能被快速输入工具无缝读取：
@@ -92,9 +92,18 @@ KVT 会在后台静默运行，自动将您笔记中的大纲结构实时编译�
 
 本项目欢迎社区开发者参与贡献。以下是深入了解并参与 KVTree 开发的快速指南。
 
+### 安装与测试
+
+```powershell
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+测试会在 GitHub Actions 的 Windows 环境中覆盖 Python 3.10 和 3.13。
+
 ### 🛠️ 技术栈 (Tech Stack)
 - **核心语言**: Python 3.10+
-- **GUI 框架**: [Flet](https://flet.dev) (基于 Flutter 的现代 Python UI 框架，提供精美的 Fluent Design 交互体验)
+- **GUI 框架**: Python 标准库 Tkinter（Windows 原生桌面界面）
 - **文件监控系统**: `watchdog` (实现毫秒级的无感热更新)
 - **数据管理层**: 标准化抽象语法树 (AST) 与本地缓存策略
 - **打包工具**: PyInstaller
@@ -138,9 +147,9 @@ KVTree/
    ```powershell
    .\venv\Scripts\Activate.ps1
    ```
-2. 安装编译插件（如果尚未安装）：
+2. 安装已锁定版本的运行与编译依赖：
    ```powershell
-   pip install pyinstaller
+   python -m pip install -r requirements-dev.txt
    ```
 3. 使用项目自带的 spec 文件一键构建（**文件夹模式**）：
    ```powershell

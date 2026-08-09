@@ -5,6 +5,14 @@ import json
 import os
 import threading
 
+from src.utils.file_utils import atomic_write_json
+
+
+def _normalize_source_path(file_path):
+    """Use one canonical key for cache access across watcher and startup paths."""
+    return os.path.normcase(os.path.realpath(os.path.abspath(file_path)))
+
+
 class CacheManager:
     def __init__(self, cache_file_path):
         self.cache_file = cache_file_path
@@ -18,7 +26,14 @@ class CacheManager:
             if os.path.exists(self.cache_file):
                 try:
                     with open(self.cache_file, 'r', encoding='utf-8') as f:
-                        self.cache_data = json.load(f)
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        self.cache_data = {
+                            _normalize_source_path(path): entry
+                            for path, entry in loaded.items()
+                        }
+                    else:
+                        self.cache_data = {}
                 except (json.JSONDecodeError, IOError):
                     # 如果文件损坏或无法读取，则视为空缓存
                     self.cache_data = {}
@@ -29,15 +44,14 @@ class CacheManager:
         """将内存中的缓存数据保存到文件。"""
         with self.lock:
             try:
-                with open(self.cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(self.cache_data, f, ensure_ascii=False, indent=4)
+                atomic_write_json(self.cache_file, self.cache_data, ensure_ascii=False, indent=4)
             except IOError as e:
                 print(f"Error saving cache file: {e}")
 
     def get_entry(self, file_path):
         """获取单个文件的缓存条目。"""
         with self.lock:
-            return self.cache_data.get(file_path)
+            return self.cache_data.get(_normalize_source_path(file_path))
 
     def update_entry(self, file_path, mtime, generated_outputs):
         """
@@ -49,7 +63,7 @@ class CacheManager:
             generated_outputs (dict): 由此文件生成的输出文件信息 {output_path: [entry1, entry2], ...}
         """
         with self.lock:
-            self.cache_data[file_path] = {
+            self.cache_data[_normalize_source_path(file_path)] = {
                 "mtime": mtime,
                 "outputs": generated_outputs
             }
@@ -57,8 +71,9 @@ class CacheManager:
     def remove_entry(self, file_path):
         """从缓存中移除一个文件的条目。"""
         with self.lock:
-            if file_path in self.cache_data:
-                del self.cache_data[file_path]
+            normalized_path = _normalize_source_path(file_path)
+            if normalized_path in self.cache_data:
+                del self.cache_data[normalized_path]
 
     def get_all_cached_paths(self):
         """获取所有已缓存的文件路径列表。"""
@@ -68,5 +83,5 @@ class CacheManager:
     def get_outputs_for_file(self, file_path):
         """获取一个文件生成的所有输出文件及其条目。"""
         with self.lock:
-            entry = self.cache_data.get(file_path, {})
+            entry = self.cache_data.get(_normalize_source_path(file_path), {})
             return entry.get("outputs", {})

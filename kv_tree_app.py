@@ -16,7 +16,7 @@ from src.ui.main_window import KvTreeAppUI
 def main():
     if sys.platform == "win32":
         try:
-            myappid = f"msjsc001.kvtreeapp.kvt.1.2.1"
+            myappid = "ellismorrow.kvtreeapp.kvt.1.2.2"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass
