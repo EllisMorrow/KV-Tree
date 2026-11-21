@@ -29,8 +29,14 @@ class _State:
     def add_active_output(self, path, source):
         self.active_outputs[path] = source
 
+    def remove_active_output(self, path):
+        self.active_outputs.pop(path, None)
+
     def get_source_files(self):
         return self.source_files
+
+    def get_excluded_paths(self):
+        return []
 
     def get_rules(self):
         return {}

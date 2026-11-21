@@ -3,6 +3,7 @@ import time
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+from src.logic.path_filter import is_excluded
 
 
 def _normalize_path(path):
@@ -49,6 +50,8 @@ class AppEventHandler(FileSystemEventHandler):
 
     def process_event(self, event_type, path):
         path = _normalize_path(path)
+        if is_excluded(path, self.state.get_excluded_paths()):
+            return
         if not path.lower().endswith(".md"):
             return
 

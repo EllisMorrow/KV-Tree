@@ -1,5 +1,6 @@
 import threading
 import copy
+from src.logic.path_filter import DEFAULT_EXCLUDED_PATHS
 
 # 程序预置的 Logseq 系统属性排除键（精确匹配 + 前缀匹配用 * 结尾标记）
 DEFAULT_LOGSEQ_EXCLUDE_KEYS = [
@@ -37,6 +38,7 @@ class AppState:
         self._advanced_options = config.get("advanced_options", {})
         self._output_selection = config.get("output_selection", {})
         self._blacklist = set(config.get("blacklist", []))
+        self._excluded_paths = list(config.get('excluded_paths', DEFAULT_EXCLUDED_PATHS))
         # 加载用户已有的排除键，并自动补全默认值（用户删除的不会被强制恢复）
         loaded_keys = config.get("logseq_exclude_keys", None)
         if loaded_keys is None or len(loaded_keys) == 0:
@@ -56,6 +58,14 @@ class AppState:
     def get_source_files(self):
         with self._lock:
             return copy.deepcopy(self._source_files)
+
+    def get_excluded_paths(self):
+        with self._lock:
+            return list(self._excluded_paths)
+
+    def set_excluded_paths(self, paths):
+        with self._lock:
+            self._excluded_paths = list(dict.fromkeys(p.strip() for p in paths if p.strip()))
             
     def update_source_file(self, path, data):
         with self._lock:
@@ -185,6 +195,10 @@ class AppState:
         with self._lock:
             self._active_outputs[path] = source
             
+    def remove_active_output(self, path):
+        with self._lock:
+            self._active_outputs.pop(path, None)
+
     def clear_active_outputs(self):
         with self._lock:
             self._active_outputs.clear()
@@ -193,6 +207,7 @@ class AppState:
         with self._lock:
             return {
                 "source_files": copy.deepcopy(self._source_files),
+                "excluded_paths": list(self._excluded_paths),
                 "output_path": self._output_path,
                 "rules": copy.deepcopy(self._rules),
                 "advanced_options": copy.deepcopy(self._advanced_options),

@@ -2,6 +2,9 @@ import re
 from collections import defaultdict
 
 
+_BACKTICK_RUN = re.compile(r"`+")
+
+
 def _safe_library_filename(library_name: str):
     """Return a safe output filename, or None for path-like/invalid labels."""
     library_name = library_name.strip()
@@ -15,19 +18,36 @@ class Node:
     """
     表示 AST 中的一个节点，对应于源文本中的一行。
     """
-    def __init__(self, raw_line: str, indent: int, parent=None):
+    def __init__(self, raw_line: str, indent: int, parent=None, code=False):
         self.raw_line = raw_line  # 原始行内容
         self.indent = indent      # 缩进级别
         self.parent = parent      # 父节点
         self.children = []        # 子节点列表
         self.tag = None           # 解析出的标签信息 (e.g., {'lib': '读书词库', 'mode': '父与子'})
-        self.content = self._parse_content() # 去除标签后的纯内容
+        self.line_without_tag = raw_line
+        self.content = raw_line.strip() if code else self._parse_content()
 
     def _parse_content(self):
         """从原始行中解析出标签和纯内容。"""
-        tag_pattern = re.compile(r'^(?P<content>.*?)\s*(?P<tag>#KV树-(?P<lib>[^-]+)(?:-(?P<mode>父与子|不包含父))?)$')
-        match = tag_pattern.search(self.raw_line.strip())
-        if match:
+        tag_pattern = re.compile(r'#KV树-(?P<lib>[^-`]+)(?:-(?P<mode>父与子|不包含父))?$')
+        line = self.raw_line.rstrip()
+        ticks = list(_BACKTICK_RUN.finditer(line))
+        spans = []
+        i = 0
+        while i < len(ticks):
+            opening = ticks[i]
+            i += 1
+            for j in range(i, len(ticks)):
+                if ticks[j].group() == opening.group():
+                    spans.append((opening.start(), ticks[j].end()))
+                    i = j + 1
+                    break
+        for start in re.finditer(r'#KV树-', line):
+            if any(left <= start.start() < right for left, right in spans):
+                continue
+            match = tag_pattern.match(line, start.start())
+            if match is None:
+                continue
             gd = match.groupdict()
             library_filename = _safe_library_filename(gd['lib'])
             if library_filename is None:
@@ -37,7 +57,8 @@ class Node:
                 'mode': gd['mode']
             }
             # 返回移除了标签和前导 `- ` 的内容
-            return gd['content'].lstrip('- ').strip()
+            self.line_without_tag = line[:match.start()].rstrip()
+            return self.line_without_tag.lstrip('- ').strip()
         # 如果没有标签，同样移除前导 `- `
         return self.raw_line.strip().lstrip('- ').strip()
 
@@ -64,6 +85,7 @@ class AstParser:
         """
         root = Node("root", -1)
         last_node_at_indent = {-1: root}
+        fence = None
 
         for line in lines:
             if not line.strip():
@@ -80,7 +102,17 @@ class AstParser:
             
             parent_node = last_node_at_indent[parent_indent]
             
-            new_node = Node(line, indent, parent=parent_node)
+            marker = re.match(r'^\s*(?:-\s+)?(?P<run>`{3,}|~{3,})(?P<tail>.*)$', line)
+            code = fence is not None
+            if fence is not None:
+                if (marker and marker['run'][0] == fence[0]
+                        and len(marker['run']) >= fence[1]
+                        and not marker['tail'].strip()):
+                    fence = None
+            elif marker and not (marker['run'][0] == '`' and '`' in marker['tail']):
+                fence = (marker['run'][0], len(marker['run']))
+                code = True
+            new_node = Node(line, indent, parent=parent_node, code=code)
             parent_node.add_child(new_node)
             
             last_node_at_indent[indent] = new_node
@@ -182,7 +214,7 @@ class AstParser:
             processed_nodes.add(node) # Mark parent as processed
 
             if mode == '父与子':
-                kv_trees[lib].append(node.raw_line.split('#KV树')[0].rstrip())
+                kv_trees[lib].append(node.line_without_tag)
                 self._render_block_children(node, lib, -1, kv_trees, processed_nodes)
             
             elif mode == '不包含父':
@@ -204,7 +236,7 @@ class AstParser:
             
             lib = node.tag['lib']
             # For single lines, we always want un-indented content.
-            content = node.raw_line.split('#KV树')[0].strip().lstrip('-').strip()
+            content = node.content
             kv_trees[lib].append(f"- {content}")
             processed_nodes.add(node)
 
@@ -222,7 +254,7 @@ class AstParser:
 
             processed_nodes.add(node)
             
-            line = node.raw_line.split('#KV树')[0].rstrip() if node.tag else node.raw_line
+            line = node.line_without_tag
 
             if base_indent != -1: # '不包含父' mode
                 output_line = ' ' * (node.indent - base_indent) + line.lstrip()
