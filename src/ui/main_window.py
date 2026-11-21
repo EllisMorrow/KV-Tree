@@ -7,6 +7,8 @@ import webbrowser
 import ctypes
 
 from src.ui.tray_icon import AppTrayIcon
+from src.logic.path_filter import normalize
+from src.logic.file_monitor import _is_within_folder
 from src.ui.components import ToolTip, AdvancedOptionsWindow, BlacklistWindow, DynamicListWindow
 
 try:
@@ -15,13 +17,14 @@ except ImportError:
     winreg = None
 
 class KvTreeAppUI(tk.Tk):
-    VERSION = "1.2.3"
+    VERSION = "1.3.0"
 
     def __init__(self, app_state, task_dispatcher, file_monitor):
         super().__init__()
         self.app_state = app_state
         self.dispatcher = task_dispatcher
         self.file_monitor = file_monitor
+        self._output_sources = {}
         self._ui_callback_queue = queue.Queue()
         self.after(25, self._drain_ui_callbacks)
         
@@ -30,7 +33,7 @@ class KvTreeAppUI(tk.Tk):
         self.dispatcher.ui_cb = {
             'set_status': self._on_ui_thread(self.set_status),
             'update_progress': self._on_ui_thread(self.update_progress),
-            'update_lists': self._on_ui_thread(self.update_lists),
+            'update_lists': self._prepare_list_refresh,
             'folder_scanned': self._on_ui_thread(self._show_scan_results_and_add),
             'show_error': self._on_ui_thread(self.show_error)
         }
@@ -68,9 +71,27 @@ class KvTreeAppUI(tk.Tk):
         
         self.tray_icon = AppTrayIcon(self, self.VERSION)
         
+        self.theme_var = tk.StringVar(
+            value="dark" if self.app_state.get_advanced_options().get("theme") == "dark" else "light"
+        )
+        self._apply_theme()
+        self.build_ui()
+        self.load_state_to_ui()
+
+        self.tray_icon.setup()
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.bind("<Unmap>", self.on_minimize)
+
+        self.dispatcher.start()
+        self.dispatcher.put_task(("initialize",))
+        if self.auto_generate.get():
+            self.file_monitor.start()
+
+    def _apply_theme(self):
+        dark = self.theme_var.get() == "dark"
         style = ttk.Style(self)
         try:
-            style.theme_use('vista')
+            style.theme_use('clam' if dark else 'vista')
         except tk.TclError:
             style.theme_use('clam')
         
@@ -82,7 +103,9 @@ class KvTreeAppUI(tk.Tk):
         style.configure("TLabel", font=default_font)
         style.configure("TButton", font=default_font, padding=6)
         style.configure("TCheckbutton", font=default_font)
-        style.configure("TLabelframe.Label", font=bold_font, foreground="#0078D4")
+        style.configure("TLabelframe.Label", font=bold_font, foreground="#75BEFF" if dark else "#0078D4")
+        style.configure("Muted.TLabel", foreground="#B8BEC7" if dark else "#666666")
+        style.configure("Link.TLabel", foreground="#75BEFF" if dark else "#0078D4")
         
         style.configure("TNotebook.Tab", font=default_font, padding=[15, 6])
         
@@ -90,19 +113,39 @@ class KvTreeAppUI(tk.Tk):
         style.configure("Treeview.Heading", font=bold_font, background="#F3F2F1", foreground="#201F1E", borderwidth=1, lightcolor="#F3F2F1", darkcolor="#F3F2F1")
         style.map("Treeview", background=[('selected', '#CBE8F6')], foreground=[('selected', '#000000')])
         
-        self.build_ui()
-        self.load_state_to_ui()
+        if dark:
+            bg, surface, fg = "#25282D", "#343942", "#F0F2F5"
+            style.configure(".", background=bg, foreground=fg, fieldbackground=surface,
+                            bordercolor="#626A76", lightcolor=surface, darkcolor=surface,
+                            troughcolor=bg, arrowcolor=fg, selectbackground="#285880",
+                            selectforeground=fg, insertcolor=fg)
+            style.configure("Treeview", background=surface, fieldbackground=surface, foreground=fg)
+            style.configure("Treeview.Heading", background=surface, foreground=fg,
+                            lightcolor=surface, darkcolor=surface)
+            style.map("Treeview", background=[("selected", "#285880")], foreground=[("selected", fg)])
+            for widget_style in ("TButton", "TCheckbutton", "TNotebook.Tab", "Treeview.Heading", "Vertical.TScrollbar"):
+                style.map(widget_style, background=[("selected", surface), ("active", "#45505D")],
+                          foreground=[("disabled", "#9299A4"), ("!disabled", fg)])
+        else:
+            bg = "#F0F0F0"
+            style.configure(".", background=bg, foreground="#201F1E", fieldbackground="white",
+                            bordercolor="#AAAAAA", lightcolor="#F3F2F1", darkcolor="#D8D8D8",
+                            troughcolor="#EEEEEE", arrowcolor="#201F1E", insertcolor="#201F1E")
+            style.configure("Treeview", background="white", fieldbackground="white", foreground="#201F1E")
+            for widget_style in ("TButton", "TCheckbutton", "TNotebook.Tab", "Treeview.Heading", "Vertical.TScrollbar"):
+                style.map(widget_style, background=[("selected", "#FFFFFF"), ("active", "#E2EBF4")],
+                          foreground=[("disabled", "#777777"), ("!disabled", "#201F1E")])
+        self.configure(background=bg)
+        self.option_add("*Canvas.background", bg)
+        self.option_add("*Toplevel.background", bg)
+        if hasattr(self, "home_canvas"):
+            self.home_canvas.configure(background=bg)
 
-        self.tray_icon.setup()
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.bind("<Unmap>", self.on_minimize)
-
-        # Start workers
-        self.dispatcher.start()
-        self.dispatcher.put_task(("initialize",))
-
-        if self.auto_generate.get():
-            self.file_monitor.start()
+    def _change_theme(self):
+        self._apply_theme()
+        self.app_state.update_advanced_options({"theme": self.theme_var.get()})
+        if hasattr(self, "trigger_save_cb"):
+            self.trigger_save_cb()
 
     def build_ui(self):
         # PACK BOTTOM BAR FIRST SO IT NEVER COLLAPSES!
@@ -132,6 +175,7 @@ class KvTreeAppUI(tk.Tk):
     def _build_home_tab(self):
         # 1. Master Scrollable Canvas for Home Tab
         canvas = tk.Canvas(self.tab_home, borderwidth=0, highlightthickness=0)
+        self.home_canvas = canvas
         v_scrollbar = ttk.Scrollbar(self.tab_home, orient="vertical", command=canvas.yview)
         
         self.home_scrollable_frame = ttk.Frame(canvas)
@@ -261,6 +305,11 @@ class KvTreeAppUI(tk.Tk):
         self.g_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         self.g_tree.bind("<Button-1>", self.on_g_tree_click)
+        self._source_tip = None
+        self._source_tip_after = None
+        self._source_tip_row = None
+        self.g_tree.bind('<Motion>', self._hover_output_source)
+        self.g_tree.bind('<Leave>', self._hide_source_tip)
         
         g_btn_frame = ttk.Frame(g_frame)
         g_btn_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
@@ -282,7 +331,7 @@ class KvTreeAppUI(tk.Tk):
         rules_lf = ttk.LabelFrame(left_col, text=" 🧹 数据清洗与过滤规则 (高级正则表达式/双元替换) ", padding="15")
         rules_lf.pack(fill=tk.BOTH, expand=True)
         
-        info_lbl = ttk.Label(rules_lf, text="配置需要跳过提取的特定文本或正则（每条正则独立）：", foreground="gray")
+        info_lbl = ttk.Label(rules_lf, text="配置需要跳过提取的特定文本或正则（每条正则独立）：", style="Muted.TLabel")
         info_lbl.pack(anchor="w", pady=(0, 10))
         
         btn_rules = ttk.Button(rules_lf, text="🪄 管理数据清洗与过滤规则", command=self.manage_rules)
@@ -291,11 +340,19 @@ class KvTreeAppUI(tk.Tk):
         
         # Adding some helper text in the blank space
         helper_text = "提示：\n• 如果你不想提取带有 'test' 的行，可以直接添加 'test'\n• 如果要高级过滤，可填写标准的正则语法"
-        ttk.Label(rules_lf, text=helper_text, foreground="#666666", justify=tk.LEFT).pack(anchor="w", pady=(20, 0))
+        ttk.Label(rules_lf, text=helper_text, style="Muted.TLabel", justify=tk.LEFT).pack(anchor="w", pady=(20, 0))
 
         # Right: Advanced Options
         common_lf = ttk.LabelFrame(right_col, text=" ⚙️ 常规偏好 ", padding="15")
         common_lf.pack(fill=tk.X, pady=(0, 15))
+        ttk.Button(common_lf, text='排除文件夹 / 文件路径',
+                   command=self.manage_excluded_paths).pack(anchor='w', pady=(0, 8))
+        appearance = ttk.Frame(common_lf)
+        appearance.pack(anchor="w", pady=(0, 5))
+        ttk.Label(appearance, text="外观主题").pack(side=tk.LEFT, padx=(0, 10))
+        for label, value in (("亮色", "light"), ("暗色", "dark")):
+            ttk.Radiobutton(appearance, text=label, value=value, variable=self.theme_var,
+                            command=self._change_theme).pack(side=tk.LEFT, padx=(0, 8))
         
         self.run_on_startup_var = tk.BooleanVar(value=opts.get("run_on_startup", False))
         ttk.Checkbutton(common_lf, text="系统启动时自启", variable=self.run_on_startup_var).pack(anchor="w", pady=5)
@@ -338,7 +395,7 @@ class KvTreeAppUI(tk.Tk):
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
         
         # Link label for github help
-        github_lbl = ttk.Label(btn_frame, text="❓ 帮助与更新 (GitHub)", foreground="#0078D4", cursor="hand2")
+        github_lbl = ttk.Label(btn_frame, text="❓ 帮助与更新 (GitHub)", style="Link.TLabel", cursor="hand2")
         github_lbl.pack(side=tk.LEFT)
         github_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/EllisMorrow/KV-Tree"))
 
@@ -461,7 +518,16 @@ class KvTreeAppUI(tk.Tk):
             display_path = "< 未设定，请点击下方更改目录指定输出位置 >"
         else:
             display_path = out_path
-        self.o_tree.insert("", "end", values=(display_path, "🗑️ 删已有词库", "👁️ 打开"))
+        self.o_tree.insert("", "end", iid="output-directory", values=(display_path, "🗑️ 删已有词库", "👁️ 打开"))
+        overlaps = out_path and out_path != os.getcwd() and any(
+            data.get("type") == "folder" and _is_within_folder(normalize(out_path), normalize(path))
+            for path, data in self.app_state.get_source_files().items()
+        )
+        self.o_tree.configure(height=2 if overlaps else 1)
+        if overlaps:
+            self.o_tree.tag_configure("warning", foreground="#FFD081" if self.theme_var.get() == "dark" else "#925000")
+            self.o_tree.insert("", "end", tags=("warning",),
+                               values=("⚠ 导出目录在笔记源内，生成的词库可能被再次扫描。", "", ""))
 
     def update_lists(self):
         self.update_source_list()
@@ -482,6 +548,7 @@ class KvTreeAppUI(tk.Tk):
 
     def on_o_tree_click(self, event):
         if self.o_tree.identify_region(event.x, event.y) != "cell": return
+        if self.o_tree.identify_row(event.y) != "output-directory": return
         column_id = self.o_tree.identify_column(event.x)
         if column_id not in ("#2", "#3"): return
         
@@ -507,6 +574,9 @@ class KvTreeAppUI(tk.Tk):
     def on_g_tree_click(self, event):
         if self.g_tree.identify_region(event.x, event.y) != "cell": return
         column_id = self.g_tree.identify_column(event.x)
+        if column_id == "#3":
+            self._hover_output_source(event)
+            return
         if column_id not in ("#1", "#5"): return
         item_id = self.g_tree.identify_row(event.y)
         if not item_id: return
@@ -518,7 +588,7 @@ class KvTreeAppUI(tk.Tk):
             self.app_state.set_output_selection(basename, not is_checked)
             
             self.dispatcher.put_task(("regenerate_output", item_id))
-            self.update_generated_list()
+            self.g_tree.set(item_id, 'output', '☐' if is_checked else '☑')
         elif column_id == "#5":
             if os.path.exists(item_id):
                 os.startfile(item_id)
@@ -603,7 +673,100 @@ class KvTreeAppUI(tk.Tk):
                 if messagebox.askyesno("更新", "Logseq 排除属性已修改，是否立即全量重建词库？"):
                     self.dispatcher.put_task(("clear_cache",))
 
+    def manage_excluded_paths(self):
+        dialog = tk.Toplevel(self)
+        dialog.title('排除文件夹 / 文件路径')
+        dialog.geometry('660x420')
+        dialog.minsize(480, 280)
+        dialog.transient(self)
+        ttk.Label(dialog, text='每行一条。同名文件夹会在所有源中跳过，其子内容也会跳过。\n也可填写文件名、相对路径或完整文件 / 文件夹路径。保存后立即重新核对词库。',
+                  style='Muted.TLabel', padding=12, wraplength=440).pack(fill='x')
+        dark = self.theme_var.get() == 'dark'
+        editor_frame = ttk.Frame(dialog)
+        editor = tk.Text(editor_frame, width=1, height=1, wrap='none', padx=10, pady=8,
+                         font=('Consolas', 11), undo=True, relief='flat',
+                         background='#343942' if dark else 'white',
+                         foreground='#F0F2F5' if dark else '#201F1E',
+                         insertbackground='white' if dark else 'black')
+        scroll = ttk.Scrollbar(editor_frame, orient='vertical', command=editor.yview)
+        editor.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        editor.pack(side='left', fill='both', expand=True)
+        editor.insert('1.0', '\n'.join(self.app_state.get_excluded_paths()))
+        def save():
+            self.app_state.set_excluded_paths(editor.get('1.0', 'end').splitlines())
+            if hasattr(self, 'trigger_save_cb'):
+                self.trigger_save_cb()
+            self.dispatcher.put_task(('initialize',))
+            dialog.destroy()
+        buttons = ttk.Frame(dialog, padding=12)
+        buttons.pack(side='bottom', fill='x')
+        ttk.Button(buttons, text='保存', command=save).pack(side='right')
+        ttk.Button(buttons, text='取消', command=dialog.destroy).pack(side='right', padx=8)
+        editor_frame.pack(fill='both', expand=True, padx=12)
+        dialog.bind('<Escape>', lambda event: dialog.destroy())
+        dialog.bind('<Control-Return>', lambda event: save())
+        editor.focus_set()
+        dialog.grab_set()
+        self.wait_window(dialog)
+
+    def _hide_source_tip(self, event=None):
+        if self._source_tip_after:
+            self.after_cancel(self._source_tip_after)
+            self._source_tip_after = None
+        if self._source_tip:
+            self._source_tip.destroy()
+            self._source_tip = None
+        self._source_tip_row = None
+
+    def _hover_output_source(self, event):
+        row = self.g_tree.identify_row(event.y)
+        if self.g_tree.identify_column(event.x) != '#3' or not row:
+            self._hide_source_tip()
+            return
+        if row == self._source_tip_row:
+            return
+        self._hide_source_tip()
+        self._source_tip_row = row
+        x, y = event.x_root + 14, event.y_root + 18
+        def show():
+            self._source_tip_after = None
+            if not self.g_tree.exists(row):
+                return
+            roots = self._output_sources.get(os.path.basename(row), ())
+            if not roots:
+                return
+            tip = self._source_tip = tk.Toplevel(self)
+            tip.overrideredirect(True)
+            tip.attributes('-topmost', True)
+            ttk.Label(tip, text='词库数据来源\n' + '\n'.join(sorted(roots)),
+                      padding=10, justify='left', wraplength=800).pack()
+            tip.update_idletasks()
+            left = min(x, max(0, self.winfo_screenwidth() - tip.winfo_reqwidth()))
+            top = y if y + tip.winfo_reqheight() <= self.winfo_screenheight() else y - tip.winfo_reqheight() - 24
+            tip.geometry(f'{left:+d}{max(0, top):+d}')
+        self._source_tip_after = self.after(450, show)
+
+    def _prepare_list_refresh(self):
+        # Runs on the dispatcher thread. Hover only reads the published index.
+        by_source = self.dispatcher.cache_manager.get_source_output_index()
+        by_output = {}
+        for path, data in self.app_state.get_source_files().items():
+            if not data.get('enabled'):
+                continue
+            entries = data.get('files', {}) if data.get('type') == 'folder' else (path,)
+            for entry in entries:
+                for output in by_source.get(normalize(entry), ()):
+                    by_output.setdefault(os.path.basename(output), set()).add(path)
+        self._on_ui_thread(self._apply_list_refresh)(by_output)
+
+    def _apply_list_refresh(self, by_output):
+        self._output_sources = by_output
+        self.update_lists()
+
     def update_generated_list(self):
+        if hasattr(self, '_source_tip'):
+            self._hide_source_tip()
         self.g_tree.delete(*self.g_tree.get_children())
         active_outputs = self.app_state.get_active_outputs()
         output_selection = self.app_state.get_output_selection()
@@ -617,10 +780,14 @@ class KvTreeAppUI(tk.Tk):
             if basename not in output_selection: 
                 self.app_state.set_output_selection(basename, False)
             
-            is_checked = self.app_state.get_output_selection().get(basename, False)
+            is_checked = output_selection.get(basename, False)
             check_char = "☑" if is_checked else "☐"
             display_source = source_path if len(source_path) < 50 else "..." + source_path[-47:]
-            if display_source == "多元": display_source = "由多个源文件合成"
+            roots = self._output_sources.get(basename, ())
+            if roots:
+                display_source = os.path.basename(next(iter(roots))) if len(roots) == 1 else f"{len(roots)} 个导入来源"
+            elif display_source == "多元":
+                display_source = "词库来源"
             self.g_tree.insert("", "end", iid=f_path, values=(check_char, basename, display_source, f_path, "👁️ 打开"))
 
     def _restart_monitor_if_auto(self):
@@ -628,6 +795,7 @@ class KvTreeAppUI(tk.Tk):
             self.file_monitor.start()
 
     def update_source_list(self):
+        self.update_o_table()
         self.s_tree.delete(*self.s_tree.get_children())
         sources = self.app_state.get_source_files()
         for p, d in sources.items():

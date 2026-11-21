@@ -5,6 +5,7 @@ import json
 import os
 
 from src.utils.file_utils import atomic_write_json
+from src.logic.path_filter import DEFAULT_EXCLUDED_PATHS
 
 DEFAULT_RULES = r"""
 [排除规则]
@@ -22,9 +23,11 @@ class ConfigManager:
         self.config_file = config_file
         self.config = {
             "source_files": {},
+            "excluded_paths": list(DEFAULT_EXCLUDED_PATHS),
             "output_path": os.getcwd(),
             "rules": DEFAULT_RULES,
             "advanced_options": {
+                "theme": "light",
                 "logseq_scan_keys": False,
                 "logseq_scan_values": False,
                 "run_on_startup": False,
@@ -51,6 +54,7 @@ class ConfigManager:
                 if data["type"] == "folder" and "files" not in data:
                     data["files"] = {}
             self.config["source_files"] = loaded_sources
+            self.config['excluded_paths'] = loaded_config.get('excluded_paths', list(DEFAULT_EXCLUDED_PATHS))
             
             self.config["output_path"] = loaded_config.get("output_path", os.getcwd())
             
@@ -88,6 +92,7 @@ class ConfigManager:
         """ 使用从主应用传入的最新数据来保存配置 """
         config_to_save = {
             "source_files": app_data.get("source_files", {}),
+            "excluded_paths": app_data.get('excluded_paths', list(DEFAULT_EXCLUDED_PATHS)),
             "output_path": app_data.get("output_path", os.getcwd()),
             "rules": app_data.get("rules", DEFAULT_RULES),
             "advanced_options": app_data.get("advanced_options", {}),

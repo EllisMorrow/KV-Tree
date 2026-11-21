@@ -15,6 +15,9 @@ class _Dispatcher:
 
 
 class _State:
+    def get_excluded_paths(self):
+        return []
+
     def __init__(self, sources):
         self.sources = sources
 

@@ -5,6 +5,8 @@ import stat
 import time
 import concurrent.futures
 from src.logic.ast_parser import AstParser
+from src.logic.cache_manager import PARSER_REVISION
+from src.logic.path_filter import is_excluded, scan_markdown
 from src.logic.logseq_parser import LogseqParser
 from src.utils.file_utils import atomic_write
 
@@ -84,6 +86,8 @@ class TaskDispatcher:
         unique_paths = set(path for event_type, path in batch)
         
         for path in unique_paths:
+            if path not in self._get_enabled_cached_scope():
+                continue
             is_deleted = not os.path.exists(path)
             old, new = self._update_cache_for_file(path, deleted=is_deleted,
                                                     rules=rules, adv_opts=adv_opts,
@@ -101,7 +105,7 @@ class TaskDispatcher:
         self.ui_cb['update_lists']()
         self.ui_cb['set_status'](f"批量更新完成。")
         
-    def _execute_initialize(self):
+    def _execute_initialize(self, force=False):
         self.ui_cb['set_status']("极速启动：正在多线程校验缓存和解析文件...")
         self.ui_cb['update_progress'](mode='determinate', val=0)
         
@@ -122,7 +126,7 @@ class TaskDispatcher:
                             entry['mtime'] = 0  # 强制使 mtime 失效，触发重新解析
                             self.cache_manager.update_entry(cp, 0, entry.get('outputs', {}))
         
-        all_source_files = self._get_all_source_files()
+        all_source_files = set(self._get_all_source_files())
         dirty_outputs = set()
         cached_paths = self.cache_manager.get_all_cached_paths()
         total_files = len(all_source_files)
@@ -140,7 +144,8 @@ class TaskDispatcher:
             
             cached_entry = self.cache_manager.get_entry(file_path)
             current_mtime = os.path.getmtime(file_path)
-            if not cached_entry or cached_entry.get("mtime") != current_mtime:
+            if (force or not cached_entry or cached_entry.get("mtime") != current_mtime
+                    or cached_entry.get("parser_revision") != PARSER_REVISION):
                 files_to_update.append(file_path)
                 
         # 2. Parallel Processing
@@ -156,15 +161,15 @@ class TaskDispatcher:
             completed = 0
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 # Map paths to future logic manually to handle cache manager locking
-                tasks = [
+                tasks = {
                     executor.submit(
                         self._parse_single_file_stateless,
                         path, rules, adv_opts, output_path_base, logseq_exclude_keys
-                    ) for path in files_to_update
-                ]
+                    ): path for path in files_to_update
+                }
                 
                 for future in concurrent.futures.as_completed(tasks):
-                    path = files_to_update[tasks.index(future)] # Get original path from task list
+                    path = tasks[future]
                     try:
                         new_data = future.result()
                         # Synchronous cache update
@@ -182,7 +187,7 @@ class TaskDispatcher:
         
         self.ui_cb['set_status']("正在清理失效缓存...")
         for file_path in cached_paths:
-            if file_path not in all_source_files:
+            if file_path not in all_source_files or not os.path.exists(file_path):
                 old = self.cache_manager.get_outputs_for_file(file_path)
                 self.cache_manager.remove_entry(file_path)
                 dirty_outputs.update(old.keys())
@@ -220,22 +225,10 @@ class TaskDispatcher:
         self.ui_cb['set_status'](f"正在后台扫描: {folder_path}...")
         self.ui_cb['update_progress'](mode='determinate', val=0)
         
-        def _fast_scan_md_with_mtime(path):
-            results = {}
-            try:
-                with os.scandir(path) as it:
-                    for entry in it:
-                        if entry.is_file() and entry.name.endswith('.md'):
-                            try:
-                                results[entry.path] = entry.stat().st_mtime
-                            except OSError: pass
-                        elif entry.is_dir():
-                            results.update(_fast_scan_md_with_mtime(entry.path))
-            except Exception: pass
-            return results
-            
         self.ui_cb['set_status'](f"正在建立极速索引: {folder_path}...")
-        scanned_files = _fast_scan_md_with_mtime(folder_path)
+        scanned_files, errors = scan_markdown(folder_path, self.state.get_excluded_paths())
+        if errors:
+            self.ui_cb['show_error']('部分目录无法扫描', '\n'.join(str(error) for error in errors[:5]))
         
         total_scan = len(scanned_files)
         # Dummy progress update since we already got all mtimes cleanly
@@ -256,21 +249,14 @@ class TaskDispatcher:
 
     def _execute_full_rescan(self):
         self.ui_cb['set_status']("开始全量重建...")
-        self.cache_manager.cache_data.clear()
-        self.state.clear_active_outputs()
-        self.ui_cb['update_lists']()
-        self._execute_initialize()
+        self._execute_initialize(force=True)
         
     def _execute_clear_cache(self):
-        self.ui_cb['set_status']("正在清除缓存...")
+        self.ui_cb['set_status']("正在重新解析并更新缓存...")
         try:
-            if os.path.exists(self.cache_manager.cache_file):
-                os.remove(self.cache_manager.cache_file)
-            self.cache_manager.cache_data.clear()
-            self.state.clear_active_outputs()
-            self.ui_cb['update_lists']()
-            self.ui_cb['set_status']("缓存已清除，正在强制重建...")
-            self._execute_initialize()
+            # Keep old output paths until reconciliation. They identify obsolete
+            # exports, and retain the last successful result if a source fails.
+            self._execute_initialize(force=True)
         except Exception as e:
             self.ui_cb['show_error']("清除缓存失败", str(e))
 
@@ -348,11 +334,22 @@ class TaskDispatcher:
         full_content = "\n".join(sorted(list(all_lines)))
         try:
             basename = os.path.basename(output_path)
+            preview_path = os.path.join("<仅缓存,未设输出目录>", basename)
+            if not all_lines:
+                self.state.remove_active_output(output_path)
+                self.state.remove_active_output(preview_path)
+                base_dest = self.state.get_output_path()
+                if (base_dest != os.getcwd()
+                        and self._is_output_path_within_root(output_path, base_dest)
+                        and os.path.isfile(output_path)):
+                    os.chmod(output_path, stat.S_IWRITE)
+                    os.remove(output_path)
+                return
             
             # Skip export if the output path is not set (empty or fallback CWD)
             base_dest = self.state.get_output_path()
             if not base_dest or base_dest == os.getcwd():
-                self.state.add_active_output(os.path.join("<仅缓存,未设输出目录>", basename), "多元")
+                self.state.add_active_output(preview_path, "多元")
                 return
 
             # Cached paths are untrusted too: never write/delete outside the
@@ -373,6 +370,7 @@ class TaskDispatcher:
                 self.state.add_active_output(output_path, "多元")
                 return
 
+            self.state.add_active_output(output_path, "多元")
             # Check if this output is enabled using AppState lock mechanism
             selection = self.state.get_output_selection()
             is_checked = selection.get(basename, False)
@@ -380,7 +378,6 @@ class TaskDispatcher:
             if is_checked:
                 # Issue 4 Risk Mitigation: Atomic file saving to prevent corruption
                 atomic_write(output_path, full_content)
-                self.state.add_active_output(output_path, "多元")
             else:
                 if os.path.exists(output_path):
                     try:
@@ -394,7 +391,31 @@ class TaskDispatcher:
         sources = self.state.get_source_files()
         for path, data in sources.items():
             if not data.get("enabled"): continue
+            if is_excluded(path, self.state.get_excluded_paths()): continue
+            if data.get("type") == "folder" and os.path.isdir(path):
+                discovered, scan_failed = scan_markdown(path, self.state.get_excluded_paths())
+                # Preserve known entries when a subtree is temporarily unreadable.
+                if scan_failed:
+                    discovered = {**data.get("files", {}), **discovered}
+                data['files'] = discovered
+                self.state.update_source_file(path, data)
             source_paths = data.get("files", {}).keys() if data.get("type") == "folder" else (path,)
             for source_path in source_paths:
+                if is_excluded(source_path, self.state.get_excluded_paths()): continue
                 paths.add(os.path.normcase(os.path.realpath(os.path.abspath(source_path))))
         return list(paths)
+
+    def _get_enabled_cached_scope(self):
+        paths = set()
+        for path, data in self.state.get_source_files().items():
+            if not data.get('enabled'):
+                continue
+            entries = data.get('files', {}) if data.get('type') == 'folder' else (path,)
+            for entry in entries:
+                if not is_excluded(entry, self.state.get_excluded_paths()):
+                    paths.add(os.path.normcase(os.path.realpath(os.path.abspath(entry))))
+        # Deleted files have already left the folder snapshot but still need cache cleanup.
+        for path in self.cache_manager.get_all_cached_paths():
+            if not os.path.exists(path):
+                paths.add(path)
+        return paths

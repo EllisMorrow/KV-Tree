@@ -7,6 +7,8 @@ import threading
 
 from src.utils.file_utils import atomic_write_json
 
+PARSER_REVISION = 2
+
 
 def _normalize_source_path(file_path):
     """Use one canonical key for cache access across watcher and startup paths."""
@@ -64,6 +66,7 @@ class CacheManager:
         """
         with self.lock:
             self.cache_data[_normalize_source_path(file_path)] = {
+                "parser_revision": PARSER_REVISION,
                 "mtime": mtime,
                 "outputs": generated_outputs
             }
@@ -79,6 +82,11 @@ class CacheManager:
         """获取所有已缓存的文件路径列表。"""
         with self.lock:
             return list(self.cache_data.keys())
+
+    def get_source_output_index(self):
+        with self.lock:
+            return {path: tuple(name for name, content in entry.get("outputs", {}).items() if content)
+                    for path, entry in self.cache_data.items()}
 
     def get_outputs_for_file(self, file_path):
         """获取一个文件生成的所有输出文件及其条目。"""
