@@ -17,7 +17,7 @@ except ImportError:
     winreg = None
 
 class KvTreeAppUI(tk.Tk):
-    VERSION = "1.3.0"
+    VERSION = "1.3.1"
 
     def __init__(self, app_state, task_dispatcher, file_monitor):
         super().__init__()
