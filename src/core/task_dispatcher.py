@@ -6,7 +6,8 @@ import time
 import concurrent.futures
 from src.logic.ast_parser import AstParser
 from src.logic.cache_manager import PARSER_REVISION
-from src.logic.path_filter import is_excluded, scan_markdown
+from src.logic.path_filter import is_excluded, normalize, scan_markdown
+from src.logic.file_monitor import _is_within_folder
 from src.logic.logseq_parser import LogseqParser
 from src.utils.file_utils import atomic_write
 
@@ -23,7 +24,9 @@ class TaskDispatcher:
         self.worker_thread = None
         self.dirty_files = set()
         self.last_dirty_time = 0
+        self.first_dirty_time = 0
         self.debounce_seconds = 2.0
+        self.max_batch_wait = 10.0
         self.running = True
         
     def start(self):
@@ -41,9 +44,22 @@ class TaskDispatcher:
         
     def _worker_loop(self):
         while self.running:
+            now = time.monotonic()
+            if self.dirty_files and (
+                now - self.last_dirty_time >= self.debounce_seconds
+                or now - self.first_dirty_time >= self.max_batch_wait
+            ):
+                try:
+                    self._process_dirty_batch()
+                except Exception as error:
+                    print(f"Batch update error: {error}")
+                    self.ui_cb['set_status']("本批更新失败，监控仍在运行。可执行全量重建。")
             try:
-                # Wait with timeout to allow checking for debounced actions
                 task = self.task_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            try:
                 task_name = task[0]
                 
                 if task_name == "exit": 
@@ -53,9 +69,11 @@ class TaskDispatcher:
                 elif task_name == "scan_folder": 
                     self._execute_scan_folder(task[1])
                 elif task_name == "process_file": 
+                    self.last_dirty_time = time.monotonic()
+                    if not self.dirty_files:
+                        self.first_dirty_time = self.last_dirty_time
                     # Add to dirty set instead of immediate processing
                     self.dirty_files.add((task[1], task[2])) # (event_type, path)
-                    self.last_dirty_time = time.time()
                 elif task_name == "regenerate_output": 
                     self._execute_regenerate_output(task[1])
                 elif task_name == "full_rescan": 
@@ -63,19 +81,16 @@ class TaskDispatcher:
                 elif task_name == "clear_cache": 
                     self._execute_clear_cache()
                 
-                self.task_queue.task_done()
-            except queue.Empty:
-                # Check dirty files for debounce
-                if self.dirty_files and (time.time() - self.last_dirty_time) >= self.debounce_seconds:
-                    self._process_dirty_batch()
             except Exception as e:
                 print(f"Worker thread error: {e}")
+            finally:
+                self.task_queue.task_done()
                 
     def _process_dirty_batch(self):
-        batch = list(self.dirty_files)
+        unique_paths = {path for _, path in self.dirty_files}
         self.dirty_files.clear()
         
-        self.ui_cb['set_status'](f"后台批量处理 {len(batch)} 个变动...")
+        self.ui_cb['set_status'](f"后台批量处理 {len(unique_paths)} 个文件...")
         dirty_outputs = set()
         
         rules = self.state.get_rules()
@@ -83,10 +98,11 @@ class TaskDispatcher:
         output_path_base = self.state.get_output_path()
         logseq_exclude_keys = self.state.get_logseq_exclude_keys()
         
-        unique_paths = set(path for event_type, path in batch)
+        enabled_scope = self._get_enabled_event_paths(unique_paths)
+        failed = 0
         
         for path in unique_paths:
-            if path not in self._get_enabled_cached_scope():
+            if path not in enabled_scope:
                 continue
             is_deleted = not os.path.exists(path)
             old, new = self._update_cache_for_file(path, deleted=is_deleted,
@@ -94,6 +110,7 @@ class TaskDispatcher:
                                                     output_path_base=output_path_base,
                                                     logseq_exclude_keys=logseq_exclude_keys)
             if new is None:
+                failed += 1
                 continue
             dirty_outputs.update(old.keys())
             dirty_outputs.update(new.keys())
@@ -103,7 +120,9 @@ class TaskDispatcher:
             
         self.cache_manager.save_cache()
         self.ui_cb['update_lists']()
-        self.ui_cb['set_status'](f"批量更新完成。")
+        self.ui_cb['set_status'](
+            f"批量更新完成，{failed} 个源文件读取失败，已保留上次结果。" if failed else "批量更新完成。"
+        )
         
     def _execute_initialize(self, force=False):
         self.ui_cb['set_status']("极速启动：正在多线程校验缓存和解析文件...")
@@ -131,7 +150,7 @@ class TaskDispatcher:
         cached_paths = self.cache_manager.get_all_cached_paths()
         total_files = len(all_source_files)
         
-        files_to_update = []
+        files_to_update = {}
         
         # 1. Quick initial sync and filter
         for i, file_path in enumerate(all_source_files):
@@ -139,14 +158,16 @@ class TaskDispatcher:
                 self.ui_cb['set_status'](f"对比文件时间戳 ({i}/{total_files})...")
                 self.ui_cb['update_progress'](val=(i/total_files*50) if total_files > 0 else 0)
             
-            if not os.path.exists(file_path): 
+            try:
+                current_mtime = os.path.getmtime(file_path)
+            except OSError as error:
+                print(f"Cannot read source timestamp {file_path}: {error}")
                 continue
             
             cached_entry = self.cache_manager.get_entry(file_path)
-            current_mtime = os.path.getmtime(file_path)
             if (force or not cached_entry or cached_entry.get("mtime") != current_mtime
                     or cached_entry.get("parser_revision") != PARSER_REVISION):
-                files_to_update.append(file_path)
+                files_to_update[file_path] = current_mtime
                 
         # 2. Parallel Processing
         if files_to_update:
@@ -174,7 +195,8 @@ class TaskDispatcher:
                         new_data = future.result()
                         # Synchronous cache update
                         old = self.cache_manager.get_outputs_for_file(path)
-                        self.cache_manager.update_entry(path, os.path.getmtime(path), new_data)
+                        # A concurrent save must not mark old parsed content as current.
+                        self.cache_manager.update_entry(path, files_to_update[path], new_data)
                         dirty_outputs.update(old.keys())
                         dirty_outputs.update(new_data.keys())
                     except Exception as exc:
@@ -274,13 +296,14 @@ class TaskDispatcher:
             if logseq_exclude_keys is None: logseq_exclude_keys = self.state.get_logseq_exclude_keys()
 
             try:
+                mtime = os.path.getmtime(path)
                 new = self._parse_single_file_stateless(path, rules, adv_opts, output_path_base, logseq_exclude_keys)
             except Exception as e:
                 print(f"Error parsing {path}: {e}")
                 # None is distinct from a valid empty parse result. The batch
                 # caller skips output regeneration, preserving cache and files.
                 return old, None
-            self.cache_manager.update_entry(path, os.path.getmtime(path), new)
+            self.cache_manager.update_entry(path, mtime, new)
         return old, new
 
     @staticmethod
@@ -405,17 +428,12 @@ class TaskDispatcher:
                 paths.add(os.path.normcase(os.path.realpath(os.path.abspath(source_path))))
         return list(paths)
 
-    def _get_enabled_cached_scope(self):
-        paths = set()
-        for path, data in self.state.get_source_files().items():
-            if not data.get('enabled'):
-                continue
-            entries = data.get('files', {}) if data.get('type') == 'folder' else (path,)
-            for entry in entries:
-                if not is_excluded(entry, self.state.get_excluded_paths()):
-                    paths.add(os.path.normcase(os.path.realpath(os.path.abspath(entry))))
-        # Deleted files have already left the folder snapshot but still need cache cleanup.
-        for path in self.cache_manager.get_all_cached_paths():
-            if not os.path.exists(path):
-                paths.add(path)
-        return paths
+    def _get_enabled_event_paths(self, changed_paths):
+        exclusions = self.state.get_excluded_paths()
+        roots = [(normalize(path), kind) for path, kind in self.state.get_enabled_source_roots()]
+        return {
+            path for path in changed_paths
+            if not is_excluded(path, exclusions)
+            and any(path == root or (kind == 'folder' and _is_within_folder(path, root))
+                    for root, kind in roots)
+        }

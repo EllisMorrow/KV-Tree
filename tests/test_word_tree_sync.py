@@ -1,5 +1,6 @@
 import tempfile
 import time
+from threading import Event
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -12,6 +13,46 @@ from src.logic.file_monitor import FileMonitor
 
 
 class WordTreeSyncTests(unittest.TestCase):
+    def test_batch_wait_is_bounded_even_with_long_debounce(self):
+        processed = Event()
+        dispatcher = TaskDispatcher(AppState(), Mock(), {"set_status": Mock()})
+        dispatcher.debounce_seconds = 60
+        dispatcher.max_batch_wait = 0.1
+
+        def process_batch():
+            dispatcher.dirty_files.clear()
+            processed.set()
+
+        dispatcher._process_dirty_batch = process_batch
+        dispatcher.start()
+        try:
+            dispatcher.put_task(("process_file", "modified", "note.md"))
+            self.assertTrue(processed.wait(3))
+        finally:
+            dispatcher.stop()
+
+    def test_worker_processes_next_batch_after_unexpected_batch_failure(self):
+        failed, processed = Event(), Event()
+
+        def process_batch():
+            dispatcher.dirty_files.clear()
+            if not failed.is_set():
+                failed.set()
+                raise OSError("simulated batch failure")
+            processed.set()
+
+        dispatcher = TaskDispatcher(AppState(), Mock(), {"set_status": Mock()})
+        dispatcher.debounce_seconds = 0
+        dispatcher._process_dirty_batch = process_batch
+        dispatcher.start()
+        try:
+            dispatcher.put_task(("process_file", "modified", "first.md"))
+            self.assertTrue(failed.wait(3))
+            dispatcher.put_task(("process_file", "modified", "second.md"))
+            self.assertTrue(processed.wait(3))
+        finally:
+            dispatcher.stop()
+
     def test_clear_cache_rebuild_removes_obsolete_export(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

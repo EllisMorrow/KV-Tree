@@ -59,6 +59,11 @@ class AppState:
         with self._lock:
             return copy.deepcopy(self._source_files)
 
+    def get_enabled_source_roots(self):
+        with self._lock:
+            return [(path, data.get("type")) for path, data in self._source_files.items()
+                    if data.get("enabled")]
+
     def get_excluded_paths(self):
         with self._lock:
             return list(self._excluded_paths)
