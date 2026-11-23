@@ -1,6 +1,12 @@
 import queue
+import tempfile
+from pathlib import Path
+from types import MethodType, SimpleNamespace
+from unittest.mock import Mock, patch
 import unittest
 
+from src.core.app_state import AppState
+from src.logic.cache_manager import CacheManager
 from src.ui.main_window import KvTreeAppUI
 from src.ui.tray_icon import AppTrayIcon
 
@@ -46,6 +52,38 @@ class UiThreadDispatchTests(unittest.TestCase):
         ui._drain_ui_callbacks()
         self.assertEqual(["ready"], calls)
         self.assertEqual(25, ui.after_calls[-1][0])
+
+    def test_incremental_source_refresh_replaces_only_affected_outputs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            notes = root / "notes"
+            note = notes / "note.md"
+            first, second = str(root / "first.md"), str(root / "second.md")
+            cache = CacheManager(root / "cache.json")
+            cache.update_entry(note, 1, {first: "- first", second: "- second"})
+            cache.save_cache()
+            cache = CacheManager(root / "cache.json")
+            ui = _UiHarness()
+            ui.app_state = AppState({
+                "source_files": {str(notes): {"enabled": True, "type": "folder", "files": {str(note): 1}}},
+            })
+            ui.dispatcher = SimpleNamespace(cache_manager=cache)
+            ui._output_sources = {}
+            ui._apply_list_refresh = MethodType(KvTreeAppUI._apply_list_refresh, ui)
+            ui.update_lists = Mock()
+
+            KvTreeAppUI._prepare_list_refresh(ui)
+            ui._drain_ui_callbacks()
+            self.assertEqual({"first.md": {str(notes)}, "second.md": {str(notes)}}, ui._output_sources)
+            self.assertEqual(("- first",), cache.get_output_contents(first))
+
+            cache.update_entry(note, 2, {second: "- second"})
+            with patch.object(cache, "get_output_sources", wraps=cache.get_output_sources) as read_sources:
+                KvTreeAppUI._prepare_list_refresh(ui, {first})
+                read_sources.assert_called_once_with("first.md")
+            ui._drain_ui_callbacks()
+            self.assertEqual({"second.md": {str(notes)}}, ui._output_sources)
+            self.assertEqual((), cache.get_output_contents(first))
 
     def test_tray_callbacks_only_queue_ui_operations(self):
         ui = _TrayUi()

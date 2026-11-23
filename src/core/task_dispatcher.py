@@ -23,6 +23,9 @@ class TaskDispatcher:
         self.task_queue = queue.Queue()
         self.worker_thread = None
         self.dirty_files = set()
+        self._failed_exports = set()
+        self._pending_event_paths = set()
+        self._pending_event_lock = threading.Lock()
         self.last_dirty_time = 0
         self.first_dirty_time = 0
         self.debounce_seconds = 2.0
@@ -40,7 +43,15 @@ class TaskDispatcher:
             self.worker_thread.join()
             
     def put_task(self, task):
-        self.task_queue.put(task)
+        if task[0] == "process_file":
+            path = task[2]
+            with self._pending_event_lock:
+                if path in self._pending_event_paths:
+                    return
+                self._pending_event_paths.add(path)
+                self.task_queue.put(task)
+        else:
+            self.task_queue.put(task)
         
     def _worker_loop(self):
         while self.running:
@@ -68,7 +79,9 @@ class TaskDispatcher:
                     self._execute_initialize()
                 elif task_name == "scan_folder": 
                     self._execute_scan_folder(task[1])
-                elif task_name == "process_file": 
+                elif task_name == "process_file":
+                    with self._pending_event_lock:
+                        self._pending_event_paths.discard(task[2])
                     self.last_dirty_time = time.monotonic()
                     if not self.dirty_files:
                         self.first_dirty_time = self.last_dirty_time
@@ -115,14 +128,18 @@ class TaskDispatcher:
             dirty_outputs.update(old.keys())
             dirty_outputs.update(new.keys())
             
-        for out_path in dirty_outputs:
-            self._update_single_output_file(out_path)
-            
+        dirty_outputs.update(self._failed_exports)
+        export_errors = [error for path in dirty_outputs
+                         if (error := self._update_single_output_file(path))]
         self.cache_manager.save_cache()
-        self.ui_cb['update_lists']()
-        self.ui_cb['set_status'](
-            f"批量更新完成，{failed} 个源文件读取失败，已保留上次结果。" if failed else "批量更新完成。"
-        )
+        self.ui_cb['update_lists'](dirty_outputs)
+        if export_errors:
+            source_error = f"另有 {failed} 个源文件读取失败，已保留上次结果。" if failed else ""
+            self.ui_cb['set_status'](f"批量更新有 {len(export_errors)} 项导出失败。{export_errors[0]}{source_error}")
+        elif failed:
+            self.ui_cb['set_status'](f"批量更新完成，{failed} 个源文件读取失败，已保留上次结果。")
+        else:
+            self.ui_cb['set_status']("批量更新完成。")
         
     def _execute_initialize(self, force=False):
         self.ui_cb['set_status']("极速启动：正在多线程校验缓存和解析文件...")
@@ -214,12 +231,16 @@ class TaskDispatcher:
                 self.cache_manager.remove_entry(file_path)
                 dirty_outputs.update(old.keys())
 
+        dirty_outputs.update(self._failed_exports)
+        export_errors = []
         if dirty_outputs:
             total_outputs = len(dirty_outputs)
             for i, out_path in enumerate(dirty_outputs):
                 self.ui_cb['set_status'](f"更新输出({i+1}/{total_outputs}): {os.path.basename(out_path)}")
                 self.ui_cb['update_progress'](val=(i+1)/total_outputs*100)
-                self._update_single_output_file(out_path)
+                error = self._update_single_output_file(out_path)
+                if error:
+                    export_errors.append(error)
         
         # update active outputs state — 根据当前 output_path 过滤
         outputs_map = {}
@@ -240,7 +261,9 @@ class TaskDispatcher:
         
         self.cache_manager.save_cache()
         self.ui_cb['update_lists']()
-        self.ui_cb['set_status']("准备就绪。")
+        self.ui_cb['set_status'](
+            f"有 {len(export_errors)} 项导出失败。{export_errors[0]}" if export_errors else "准备就绪。"
+        )
         self.ui_cb['update_progress'](val=0)
 
     def _execute_scan_folder(self, folder_path):
@@ -265,9 +288,9 @@ class TaskDispatcher:
 
     def _execute_regenerate_output(self, output_path):
         self.ui_cb['set_status'](f"后台更新: {os.path.basename(output_path)}...")
-        self._update_single_output_file(output_path)
-        self.ui_cb['update_lists']()
-        self.ui_cb['set_status'](f"'{os.path.basename(output_path)}' 更新完成。")
+        error = self._update_single_output_file(output_path)
+        self.ui_cb['update_lists']({output_path})
+        self.ui_cb['set_status'](error or f"'{os.path.basename(output_path)}' 更新完成。")
 
     def _execute_full_rescan(self):
         self.ui_cb['set_status']("开始全量重建...")
@@ -349,65 +372,54 @@ class TaskDispatcher:
             return False
 
     def _update_single_output_file(self, output_path):
-        all_lines = set()
-        for src in self.cache_manager.get_all_cached_paths():
-            outputs = self.cache_manager.get_outputs_for_file(src)
-            if output_path in outputs and outputs[output_path]: all_lines.update(outputs[output_path].splitlines())
-        
-        full_content = "\n".join(sorted(list(all_lines)))
         try:
-            basename = os.path.basename(output_path)
-            preview_path = os.path.join("<仅缓存,未设输出目录>", basename)
-            if not all_lines:
-                self.state.remove_active_output(output_path)
-                self.state.remove_active_output(preview_path)
-                base_dest = self.state.get_output_path()
-                if (base_dest != os.getcwd()
-                        and self._is_output_path_within_root(output_path, base_dest)
-                        and os.path.isfile(output_path)):
-                    os.chmod(output_path, stat.S_IWRITE)
-                    os.remove(output_path)
-                return
-            
-            # Skip export if the output path is not set (empty or fallback CWD)
-            base_dest = self.state.get_output_path()
-            if not base_dest or base_dest == os.getcwd():
-                self.state.add_active_output(preview_path, "多元")
-                return
+            self._write_output(output_path)
+        except OSError as error:
+            message = f"导出 {os.path.basename(output_path)} 失败：{error.strerror or error}"
+            self._failed_exports.add(output_path)
+            return message
+        self._failed_exports.discard(output_path)
+        return None
 
-            # Cached paths are untrusted too: never write/delete outside the
-            # configured output root, even if a malformed label reached cache.
-            if not self._is_output_path_within_root(output_path, base_dest):
-                print(f"Refusing output path outside configured root: {output_path}")
-                return
-                
-            # Check the blacklist first! If blacklisted, block everything.
-            blacklist = self.state.get_blacklist()
-            if basename in blacklist:
-                if os.path.exists(output_path):
-                    try:
-                        os.chmod(output_path, stat.S_IWRITE)
-                        os.remove(output_path)
-                    except Exception: pass
-                # Still add it to active outputs so it shows up in UI (to be un-blacklisted later if needed)
-                self.state.add_active_output(output_path, "多元")
-                return
+    def _write_output(self, output_path):
+        all_lines = {
+            line for content in self.cache_manager.get_output_contents(output_path)
+            for line in content.splitlines()
+        }
+        basename = os.path.basename(output_path)
+        preview_path = os.path.join("<仅缓存,未设输出目录>", basename)
+        base_dest = self.state.get_output_path()
+        can_export = base_dest and base_dest != os.getcwd()
+        if not all_lines:
+            self.state.remove_active_output(output_path)
+            self.state.remove_active_output(preview_path)
+            if can_export and self._is_output_path_within_root(output_path, base_dest):
+                self._remove_output_file(output_path)
+            return
+        if not can_export:
+            self.state.add_active_output(preview_path, "多元")
+            return
 
-            self.state.add_active_output(output_path, "多元")
-            # Check if this output is enabled using AppState lock mechanism
-            selection = self.state.get_output_selection()
-            is_checked = selection.get(basename, False)
-            
-            if is_checked:
-                # Issue 4 Risk Mitigation: Atomic file saving to prevent corruption
-                atomic_write(output_path, full_content)
-            else:
-                if os.path.exists(output_path):
-                    try:
-                        os.chmod(output_path, stat.S_IWRITE)
-                        os.remove(output_path)
-                    except Exception: pass
-        except Exception as e: print(f"Error writing {output_path}: {e}")
+        # Cached paths can outlive a change to the configured output directory.
+        if not self._is_output_path_within_root(output_path, base_dest):
+            return
+
+        self.state.add_active_output(output_path, "多元")
+        selected = self.state.get_output_selection().get(basename, False)
+        if selected and basename not in self.state.get_blacklist():
+            atomic_write(output_path, "\n".join(sorted(all_lines)))
+        else:
+            self._remove_output_file(output_path)
+
+    @staticmethod
+    def _remove_output_file(path):
+        try:
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                raise OSError("输出位置不是普通文件")
+            os.chmod(path, stat.S_IWRITE)
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 
     def _get_all_source_files(self):
         paths = set()

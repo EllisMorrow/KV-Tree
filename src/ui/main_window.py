@@ -520,8 +520,8 @@ class KvTreeAppUI(tk.Tk):
             display_path = out_path
         self.o_tree.insert("", "end", iid="output-directory", values=(display_path, "🗑️ 删已有词库", "👁️ 打开"))
         overlaps = out_path and out_path != os.getcwd() and any(
-            data.get("type") == "folder" and _is_within_folder(normalize(out_path), normalize(path))
-            for path, data in self.app_state.get_source_files().items()
+            kind == "folder" and _is_within_folder(normalize(out_path), normalize(path))
+            for path, kind, _ in self.app_state.get_source_roots()
         )
         self.o_tree.configure(height=2 if overlaps else 1)
         if overlaps:
@@ -747,21 +747,28 @@ class KvTreeAppUI(tk.Tk):
             tip.geometry(f'{left:+d}{max(0, top):+d}')
         self._source_tip_after = self.after(450, show)
 
-    def _prepare_list_refresh(self):
-        # Runs on the dispatcher thread. Hover only reads the published index.
-        by_source = self.dispatcher.cache_manager.get_source_output_index()
-        by_output = {}
-        for path, data in self.app_state.get_source_files().items():
-            if not data.get('enabled'):
-                continue
-            entries = data.get('files', {}) if data.get('type') == 'folder' else (path,)
-            for entry in entries:
-                for output in by_source.get(normalize(entry), ()):
-                    by_output.setdefault(os.path.basename(output), set()).add(path)
-        self._on_ui_thread(self._apply_list_refresh)(by_output)
+    def _prepare_list_refresh(self, dirty_outputs=None):
+        cache = self.dispatcher.cache_manager
+        full_refresh = dirty_outputs is None
+        names = cache.get_output_names() if full_refresh else {
+            os.path.basename(path) for path in dirty_outputs
+        }
+        roots = [(path, normalize(path), kind)
+                 for path, kind in self.app_state.get_enabled_source_roots()]
+        changes = {
+            name: self.app_state.get_source_owners(cache.get_output_sources(name), roots)
+            for name in names
+        }
+        self._on_ui_thread(self._apply_list_refresh)(changes, full_refresh)
 
-    def _apply_list_refresh(self, by_output):
-        self._output_sources = by_output
+    def _apply_list_refresh(self, changes, full_refresh):
+        if full_refresh:
+            self._output_sources.clear()
+        for name, roots in changes.items():
+            if roots:
+                self._output_sources[name] = roots
+            else:
+                self._output_sources.pop(name, None)
         self.update_lists()
 
     def update_generated_list(self):
@@ -797,10 +804,9 @@ class KvTreeAppUI(tk.Tk):
     def update_source_list(self):
         self.update_o_table()
         self.s_tree.delete(*self.s_tree.get_children())
-        sources = self.app_state.get_source_files()
-        for p, d in sources.items():
-            display_text = f"[{d.get('type', 'file').upper()}] {p}"
-            self.s_tree.insert("", "end", iid=p, values=(display_text, "启用" if d.get("enabled") else "禁用", "👁️ 打开"))
+        for path, kind, enabled in self.app_state.get_source_roots():
+            display_text = f"[{(kind or 'file').upper()}] {path}"
+            self.s_tree.insert("", "end", iid=path, values=(display_text, "启用" if enabled else "禁用", "👁️ 打开"))
 
     def add_files(self):
         files = filedialog.askopenfilenames(title="选择.md文件", filetypes=(("Markdown", "*.md"), ("All files", "*.*")))

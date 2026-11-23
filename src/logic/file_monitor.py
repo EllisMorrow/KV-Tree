@@ -1,5 +1,4 @@
 import os
-import time
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -27,65 +26,35 @@ class AppEventHandler(FileSystemEventHandler):
         super().__init__()
         self.dispatcher = task_dispatcher
         self.state = app_state
-        self.last_event_time = {}
-
-    def _matching_sources(self, path):
-        """Return enabled sources that own this path, or no match.
-
-        A file included by an enabled folder remains in scope even if the same
-        path was also added separately and disabled; folder membership is an
-        independent user choice.
-        """
-        matches = []
-        for source_path, source_data in self.state.get_source_files().items():
-            if not source_data.get("enabled"):
-                continue
-            normalized_source = _normalize_path(source_path)
-            if source_data.get("type") == "folder":
-                if _is_within_folder(path, normalized_source):
-                    matches.append((source_path, source_data))
-            elif path == normalized_source:
-                matches.append((None, None))
-        return matches
 
     def process_event(self, event_type, path):
         path = _normalize_path(path)
-        if is_excluded(path, self.state.get_excluded_paths()):
-            return
-        if not path.lower().endswith(".md"):
+        if not path.lower().endswith(".md") or is_excluded(path, self.state.get_excluded_paths()):
             return
 
-        matching_sources = self._matching_sources(path)
-        if not matching_sources:
+        folder_roots = []
+        matched_file = False
+        for source, kind in self.state.get_enabled_source_roots():
+            root = _normalize_path(source)
+            if kind == "folder":
+                if _is_within_folder(path, root):
+                    folder_roots.append(source)
+            elif root == path:
+                matched_file = True
+        if not folder_roots and not matched_file:
             return
 
-        self.last_event_time[path] = time.time()
-        self._sync_shadow_state(event_type, path, matching_sources)
-        self.dispatcher.put_task(("process_file", event_type, path))
-
-    def _sync_shadow_state(self, event_type, path, matching_sources):
-        """Keep enabled folder snapshots in step with accepted events."""
-        for source_path, source_data in matching_sources:
-            if source_path is None:
-                continue
-
-            files = source_data.setdefault("files", {})
-            existing_path = next(
-                (stored_path for stored_path in files if _normalize_path(stored_path) == path),
-                None,
-            )
-            if event_type in ("created", "modified"):
+        if folder_roots:
+            if event_type == "deleted":
+                self.state.update_folder_members(folder_roots, path, None)
+            else:
                 try:
-                    current_mtime = os.path.getmtime(path)
+                    mtime = os.path.getmtime(path)
                 except OSError:
-                    continue
-                stored_path = existing_path or path
-                if files.get(stored_path) != current_mtime:
-                    files[stored_path] = current_mtime
-                    self.state.update_source_file(source_path, source_data)
-            elif event_type == "deleted" and existing_path is not None:
-                del files[existing_path]
-                self.state.update_source_file(source_path, source_data)
+                    pass  # The worker will check the file's final state.
+                else:
+                    self.state.update_folder_members(folder_roots, path, mtime)
+        self.dispatcher.put_task(("process_file", event_type, path))
 
     def on_modified(self, event):
         if not event.is_directory:

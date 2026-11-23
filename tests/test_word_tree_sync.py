@@ -3,13 +3,14 @@ import time
 from threading import Event
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from src.core.app_state import AppState
 from src.core.task_dispatcher import TaskDispatcher
 from src.logic.ast_parser import AstParser
 from src.logic.cache_manager import CacheManager
 from src.logic.file_monitor import FileMonitor
+from src.logic.path_filter import normalize
 
 
 class WordTreeSyncTests(unittest.TestCase):
@@ -52,6 +53,40 @@ class WordTreeSyncTests(unittest.TestCase):
             self.assertTrue(processed.wait(3))
         finally:
             dispatcher.stop()
+
+    def test_pending_file_events_share_one_queue_entry_per_path(self):
+        dispatcher = TaskDispatcher(AppState(), Mock(), {})
+        for event in ("created", "modified", "deleted"):
+            dispatcher.put_task(("process_file", event, "first.md"))
+        dispatcher.put_task(("process_file", "created", "second.md"))
+        self.assertEqual(2, dispatcher.task_queue.qsize())
+
+    def test_export_failure_reports_and_retries_with_latest_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "note.md"
+            source.write_text("- 新词条 #KV树-测试", encoding="utf-8")
+            output = root / "#KV树-测试.md"
+            output.write_text("- 旧词条", encoding="utf-8")
+            state = AppState({
+                "source_files": {str(source): {"enabled": True, "type": "file"}},
+                "output_path": folder,
+                "output_selection": {output.name: True},
+            })
+            cache = CacheManager(root / "cache.json")
+            callbacks = {key: Mock() for key in ("set_status", "update_lists")}
+            dispatcher = TaskDispatcher(state, cache, callbacks)
+            dispatcher.dirty_files.add(("modified", normalize(source)))
+            with patch("src.core.task_dispatcher.atomic_write", side_effect=PermissionError("locked")):
+                dispatcher._process_dirty_batch()
+            self.assertIn("导出失败", callbacks["set_status"].call_args.args[0])
+            self.assertEqual("- 旧词条", output.read_text(encoding="utf-8"))
+            self.assertEqual(("- 新词条",), cache.get_output_contents(str(output)))
+
+            dispatcher._execute_regenerate_output(str(output))
+            self.assertIn("更新完成", callbacks["set_status"].call_args.args[0])
+            self.assertEqual("- 新词条", output.read_text(encoding="utf-8"))
+            self.assertEqual(set(), dispatcher._failed_exports)
 
     def test_clear_cache_rebuild_removes_obsolete_export(self):
         with tempfile.TemporaryDirectory() as folder:

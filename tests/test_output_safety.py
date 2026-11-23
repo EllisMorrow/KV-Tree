@@ -59,6 +59,9 @@ class _Cache:
         self.removed = []
         self.saved = 0
 
+    def get_output_contents(self, path):
+        return (self.outputs[path],) if self.outputs.get(path) else ()
+
     def get_all_cached_paths(self):
         return [self.cached_path]
 

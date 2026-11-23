@@ -1,6 +1,6 @@
 import threading
 import copy
-from src.logic.path_filter import DEFAULT_EXCLUDED_PATHS
+from src.logic.path_filter import DEFAULT_EXCLUDED_PATHS, normalize
 
 # 程序预置的 Logseq 系统属性排除键（精确匹配 + 前缀匹配用 * 结尾标记）
 DEFAULT_LOGSEQ_EXCLUDE_KEYS = [
@@ -32,7 +32,10 @@ class AppState:
         self._lock = threading.Lock()
         
         config = config or {}
-        self._source_files = config.get("source_files", {})
+        self._source_files = {
+            path: self._canonical_source(data)
+            for path, data in config.get("source_files", {}).items()
+        }
         self._output_path = config.get("output_path", "")
         self._rules = config.get("rules", "")
         self._advanced_options = config.get("advanced_options", {})
@@ -59,6 +62,45 @@ class AppState:
         with self._lock:
             return copy.deepcopy(self._source_files)
 
+    @staticmethod
+    def _canonical_source(data):
+        data = dict(data)
+        if data.get("type") == "folder":
+            data["files"] = {normalize(path): mtime for path, mtime in data.get("files", {}).items()}
+        return data
+
+    def get_source_roots(self):
+        with self._lock:
+            return [(path, data.get("type"), data.get("enabled"))
+                    for path, data in self._source_files.items()]
+
+    def get_source_owners(self, canonical_paths, enabled_roots):
+        with self._lock:
+            owners = set()
+            for path, canonical_root, kind in enabled_roots:
+                source = self._source_files.get(path)
+                if not source or not source.get("enabled"):
+                    continue
+                if kind == "folder":
+                    files = source.get("files", {})
+                    if any(member in files for member in canonical_paths):
+                        owners.add(path)
+                elif canonical_root in canonical_paths:
+                    owners.add(path)
+            return owners
+
+    def update_folder_members(self, roots, path, mtime):
+        with self._lock:
+            for root in roots:
+                source = self._source_files.get(root)
+                if not source or not source.get("enabled") or source.get("type") != "folder":
+                    continue
+                files = source["files"]
+                if mtime is None:
+                    files.pop(path, None)
+                else:
+                    files[path] = mtime
+
     def get_enabled_source_roots(self):
         with self._lock:
             return [(path, data.get("type")) for path, data in self._source_files.items()
@@ -73,8 +115,9 @@ class AppState:
             self._excluded_paths = list(dict.fromkeys(p.strip() for p in paths if p.strip()))
             
     def update_source_file(self, path, data):
+        canonical = self._canonical_source(data)
         with self._lock:
-            self._source_files[path] = data
+            self._source_files[path] = canonical
             
     def remove_source_file(self, path):
         with self._lock:

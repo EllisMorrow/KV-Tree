@@ -19,6 +19,7 @@ class CacheManager:
     def __init__(self, cache_file_path):
         self.cache_file = cache_file_path
         self.cache_data = {}
+        self._by_output_name = {}
         self.lock = threading.Lock() # 线程锁，确保多线程写入安全
         self.load_cache()
 
@@ -32,7 +33,7 @@ class CacheManager:
                     if isinstance(loaded, dict):
                         self.cache_data = {
                             _normalize_source_path(path): entry
-                            for path, entry in loaded.items()
+                            for path, entry in loaded.items() if isinstance(entry, dict)
                         }
                     else:
                         self.cache_data = {}
@@ -41,6 +42,43 @@ class CacheManager:
                     self.cache_data = {}
             else:
                 self.cache_data = {}
+
+            self._by_output_name.clear()
+            for path, entry in self.cache_data.items():
+                self._index_outputs(path, entry.get("outputs", {}))
+
+    def _index_outputs(self, source, outputs):
+        for output, content in outputs.items():
+            if content:
+                self._by_output_name.setdefault(os.path.basename(output), {}).setdefault(output, {})[source] = content
+
+    def _remove_indexed_outputs(self, source):
+        entry = self.cache_data.get(source, {})
+        for output, content in entry.get("outputs", {}).items():
+            if not content:
+                continue
+            name = os.path.basename(output)
+            paths = self._by_output_name[name]
+            contributors = paths[output]
+            del contributors[source]
+            if not contributors:
+                del paths[output]
+            if not paths:
+                del self._by_output_name[name]
+
+    def get_output_names(self):
+        with self.lock:
+            return set(self._by_output_name)
+
+    def get_output_sources(self, name):
+        with self.lock:
+            return {source for contributors in self._by_output_name.get(name, {}).values()
+                    for source in contributors}
+
+    def get_output_contents(self, output):
+        with self.lock:
+            paths = self._by_output_name.get(os.path.basename(output), {})
+            return tuple(paths.get(output, {}).values())
 
     def save_cache(self):
         """将内存中的缓存数据保存到文件。"""
@@ -65,7 +103,10 @@ class CacheManager:
             generated_outputs (dict): 由此文件生成的输出文件信息 {output_path: [entry1, entry2], ...}
         """
         with self.lock:
-            self.cache_data[_normalize_source_path(file_path)] = {
+            path = _normalize_source_path(file_path)
+            self._remove_indexed_outputs(path)
+            self._index_outputs(path, generated_outputs)
+            self.cache_data[path] = {
                 "parser_revision": PARSER_REVISION,
                 "mtime": mtime,
                 "outputs": generated_outputs
@@ -76,17 +117,13 @@ class CacheManager:
         with self.lock:
             normalized_path = _normalize_source_path(file_path)
             if normalized_path in self.cache_data:
+                self._remove_indexed_outputs(normalized_path)
                 del self.cache_data[normalized_path]
 
     def get_all_cached_paths(self):
         """获取所有已缓存的文件路径列表。"""
         with self.lock:
             return list(self.cache_data.keys())
-
-    def get_source_output_index(self):
-        with self.lock:
-            return {path: tuple(name for name, content in entry.get("outputs", {}).items() if content)
-                    for path, entry in self.cache_data.items()}
 
     def get_outputs_for_file(self, file_path):
         """获取一个文件生成的所有输出文件及其条目。"""
