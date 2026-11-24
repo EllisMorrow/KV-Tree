@@ -4,12 +4,11 @@ import os
 import queue
 import sys
 import webbrowser
-import ctypes
 
 from src.ui.tray_icon import AppTrayIcon
 from src.logic.path_filter import normalize
 from src.logic.file_monitor import _is_within_folder
-from src.ui.components import ToolTip, AdvancedOptionsWindow, BlacklistWindow, DynamicListWindow
+from src.ui.components import BlacklistWindow, DynamicListWindow, ScrollablePane, ToolTip
 
 try:
     import winreg
@@ -17,7 +16,7 @@ except ImportError:
     winreg = None
 
 class KvTreeAppUI(tk.Tk):
-    VERSION = "1.3.1"
+    VERSION = "1.3.2"
 
     def __init__(self, app_state, task_dispatcher, file_monitor):
         super().__init__()
@@ -35,6 +34,7 @@ class KvTreeAppUI(tk.Tk):
             'update_progress': self._on_ui_thread(self.update_progress),
             'update_lists': self._prepare_list_refresh,
             'folder_scanned': self._on_ui_thread(self._show_scan_results_and_add),
+            'exports_deleted': self._on_ui_thread(self._show_export_deletion_result),
             'show_error': self._on_ui_thread(self.show_error)
         }
         self.file_monitor.ui_cb = self.dispatcher.ui_cb
@@ -42,18 +42,20 @@ class KvTreeAppUI(tk.Tk):
         self.title(f"KVTree - v{self.VERSION} (Official)")
         self.state("normal")
         
-        # Load previous geometry if exists, otherwise center to default 1050x700
         saved_geo = self.app_state.get_window_geometry()
         if saved_geo:
-            self.geometry(saved_geo)
-        else:
-            self.update_idletasks()
-            x = (self.winfo_screenwidth() - 1050) // 2
-            y = (self.winfo_screenheight() - 700) // 2
-            self.geometry(f"1050x700+{x}+{y}")
-            
-        self.minsize(800, 600)  # Prevent user from making it too small
-        
+            try:
+                self.geometry(saved_geo)
+            except tk.TclError:
+                saved_geo = ""
+        if not saved_geo:
+            width = min(1080, self.winfo_screenwidth() - 40)
+            height = min(800, self.winfo_screenheight() - 100)
+            x = (self.winfo_screenwidth() - width) // 2
+            y = (self.winfo_screenheight() - height) // 2
+            self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(780, 560)
+
         icon_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "..", "..", "icon.ico")
         if os.path.exists(icon_path):
             try:
@@ -86,60 +88,74 @@ class KvTreeAppUI(tk.Tk):
         self.dispatcher.put_task(("initialize",))
         if self.auto_generate.get():
             self.file_monitor.start()
+        self.after(1000, self._check_file_monitor)
+
+    def _check_file_monitor(self):
+        try:
+            self.file_monitor.check_watches()
+        except OSError as error:
+            self.set_status(f"文件监控恢复失败，将重试：{error}")
+        self.after(1000, self._check_file_monitor)
 
     def _apply_theme(self):
         dark = self.theme_var.get() == "dark"
         style = ttk.Style(self)
-        try:
-            style.theme_use('clam' if dark else 'vista')
-        except tk.TclError:
-            style.theme_use('clam')
-        
-        # Modern UI Polish
-        default_font = ("Microsoft YaHei UI", 10)
-        bold_font = ("Microsoft YaHei UI", 10, "bold")
-        
-        style.configure(".", font=default_font)
-        style.configure("TLabel", font=default_font)
-        style.configure("TButton", font=default_font, padding=6)
-        style.configure("TCheckbutton", font=default_font)
-        style.configure("TLabelframe.Label", font=bold_font, foreground="#75BEFF" if dark else "#0078D4")
-        style.configure("Muted.TLabel", foreground="#B8BEC7" if dark else "#666666")
-        style.configure("Link.TLabel", foreground="#75BEFF" if dark else "#0078D4")
-        
-        style.configure("TNotebook.Tab", font=default_font, padding=[15, 6])
-        
-        style.configure("Treeview", font=default_font, rowheight=30, borderwidth=0)
-        style.configure("Treeview.Heading", font=bold_font, background="#F3F2F1", foreground="#201F1E", borderwidth=1, lightcolor="#F3F2F1", darkcolor="#F3F2F1")
-        style.map("Treeview", background=[('selected', '#CBE8F6')], foreground=[('selected', '#000000')])
-        
+        style.theme_use("clam")
         if dark:
-            bg, surface, fg = "#25282D", "#343942", "#F0F2F5"
-            style.configure(".", background=bg, foreground=fg, fieldbackground=surface,
-                            bordercolor="#626A76", lightcolor=surface, darkcolor=surface,
-                            troughcolor=bg, arrowcolor=fg, selectbackground="#285880",
-                            selectforeground=fg, insertcolor=fg)
-            style.configure("Treeview", background=surface, fieldbackground=surface, foreground=fg)
-            style.configure("Treeview.Heading", background=surface, foreground=fg,
-                            lightcolor=surface, darkcolor=surface)
-            style.map("Treeview", background=[("selected", "#285880")], foreground=[("selected", fg)])
-            for widget_style in ("TButton", "TCheckbutton", "TNotebook.Tab", "Treeview.Heading", "Vertical.TScrollbar"):
-                style.map(widget_style, background=[("selected", surface), ("active", "#45505D")],
-                          foreground=[("disabled", "#9299A4"), ("!disabled", fg)])
+            page, surface, field, stripe = "#141b27", "#1e2939", "#192333", "#202c3e"
+            text, muted, line = "#eef2fa", "#acb9cc", "#344358"
+            accent, hover, selected = "#93b8ff", "#afcaff", "#304b77"
+            accent_text, warning, danger = "#14213b", "#ffce83", "#ffb3b2"
         else:
-            bg = "#F0F0F0"
-            style.configure(".", background=bg, foreground="#201F1E", fieldbackground="white",
-                            bordercolor="#AAAAAA", lightcolor="#F3F2F1", darkcolor="#D8D8D8",
-                            troughcolor="#EEEEEE", arrowcolor="#201F1E", insertcolor="#201F1E")
-            style.configure("Treeview", background="white", fieldbackground="white", foreground="#201F1E")
-            for widget_style in ("TButton", "TCheckbutton", "TNotebook.Tab", "Treeview.Heading", "Vertical.TScrollbar"):
-                style.map(widget_style, background=[("selected", "#FFFFFF"), ("active", "#E2EBF4")],
-                          foreground=[("disabled", "#777777"), ("!disabled", "#201F1E")])
-        self.configure(background=bg)
-        self.option_add("*Canvas.background", bg)
-        self.option_add("*Toplevel.background", bg)
-        if hasattr(self, "home_canvas"):
-            self.home_canvas.configure(background=bg)
+            page, surface, field, stripe = "#f1f5fa", "#ffffff", "#ffffff", "#f5f8fd"
+            text, muted, line = "#17263b", "#53667d", "#d6e0ec"
+            accent, hover, selected = "#2458ba", "#184aab", "#dce9ff"
+            accent_text, warning, danger = "#ffffff", "#855209", "#a12c3a"
+
+        font = ("Microsoft YaHei UI", 10)
+        bold = (*font, "bold")
+        row_height = max(29, round(self.winfo_fpixels("1p") * 21))
+        style.configure(".", font=font, background=surface, foreground=text,
+                        fieldbackground=field, bordercolor=line, lightcolor=surface,
+                        darkcolor=surface, troughcolor=page, arrowcolor=muted,
+                        selectbackground=selected, selectforeground=text, insertcolor=text)
+        style.configure("Page.TFrame", background=page)
+        style.configure("Brand.TLabel", font=("Microsoft YaHei UI", 13, "bold"))
+        style.configure("Muted.TLabel", foreground=muted)
+        style.configure("Monitor.TLabel", foreground=accent, background=stripe, font=bold, padding=(8, 3))
+        style.configure("Section.TLabel", font=bold)
+        style.configure("Prefix.TLabel", foreground=accent, background=stripe)
+        style.configure("Warning.TLabel", foreground=warning)
+        style.configure("Tooltip.TLabel", background=field, foreground=text, relief="solid")
+        style.configure("TNotebook", background=page, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", padding=(20, 9), foreground=muted)
+        style.map("TNotebook.Tab", background=[("selected", surface), ("active", stripe)],
+                  foreground=[("selected", accent)])
+        style.configure("TLabelframe", borderwidth=1, relief="solid")
+        style.configure("TLabelframe.Label", font=bold, foreground=text)
+        style.configure("TButton", padding=(12, 6), relief="flat")
+        style.map("TButton", background=[("pressed", selected), ("active", stripe)])
+        style.configure("Accent.TButton", background=accent, foreground=accent_text,
+                        font=bold, lightcolor=accent, darkcolor=accent, bordercolor=accent)
+        style.map("Accent.TButton", background=[("pressed", hover), ("active", hover)],
+                  foreground=[("!disabled", accent_text)])
+        style.configure("Danger.TButton", foreground=danger)
+        style.map("Danger.TButton", foreground=[("!disabled", danger)])
+        style.configure("Treeview", font=font, rowheight=row_height, borderwidth=1,
+                        background=field, fieldbackground=field, foreground=text)
+        style.configure("Treeview.Heading", font=bold, padding=(6, 6), relief="flat",
+                        background=stripe, foreground=muted, lightcolor=stripe, darkcolor=stripe)
+        style.map("Treeview", background=[("selected", selected)], foreground=[("selected", text)])
+        style.configure("Horizontal.TProgressbar", background=accent, bordercolor=page,
+                        lightcolor=accent, darkcolor=accent)
+        self.configure(background=page)
+        self.option_add("*Canvas.background", page)
+        self.option_add("*Toplevel.background", surface)
+        for canvas in getattr(self, "_page_canvases", ()):
+            canvas.configure(background=page)
+        for tree in (getattr(self, "s_tree", None), getattr(self, "g_tree", None)):
+            if tree is not None:
+                tree.tag_configure("stripe", background=stripe)
 
     def _change_theme(self):
         self._apply_theme()
@@ -148,79 +164,58 @@ class KvTreeAppUI(tk.Tk):
             self.trigger_save_cb()
 
     def build_ui(self):
-        # PACK BOTTOM BAR FIRST SO IT NEVER COLLAPSES!
-        bottom_frame = ttk.Frame(self)
-        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(bottom_frame, textvariable=self.status_var, relief=tk.SUNKEN).pack(side=tk.BOTTOM, fill=tk.X)
-        
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(bottom_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(5, 5))
+        header = ttk.Frame(self, padding=(16, 4))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="KVTree", style="Brand.TLabel").pack(side=tk.LEFT)
+        self.monitor_label = ttk.Label(header, style="Monitor.TLabel")
+        self.monitor_label.pack(side=tk.RIGHT)
+        self._update_monitor_label()
 
-        # Main Notebook structure for Tabs
+        footer = ttk.Frame(self, padding=(18, 8))
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_var = tk.StringVar(value="就绪")
+        status = ttk.Label(footer, textvariable=self.status_var, style="Muted.TLabel")
+        status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(footer, variable=self.progress_var, maximum=100, length=112)
+        self.progress_bar.pack(side=tk.RIGHT, padx=(12, 0))
+        footer.bind("<Configure>", lambda event: status.configure(wraplength=max(1, event.width - 156)))
+
         self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        
-        self.tab_home = ttk.Frame(self.notebook, padding="10")
-        self.tab_settings = ttk.Frame(self.notebook, padding="10")
-        
-        self.notebook.add(self.tab_home, text=" 🏠 词库转换控制台 ")
-        self.notebook.add(self.tab_settings, text=" 🛠️ 偏好与高级设置 ")
-        
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 0))
+        self.notebook.enable_traversal()
+        self._page_canvases = []
+        home, settings = (ScrollablePane(self.notebook) for _ in range(2))
+        self.notebook.add(home, text="词库工作台")
+        self.notebook.add(settings, text="偏好与高级设置")
+        for pane in (home, settings):
+            pane.body.configure(style="Page.TFrame", padding=(0, 12, 12, 8))
+            self._page_canvases.append(pane.canvas)
+        self.home_scrollable_frame, self.tab_settings = home.body, settings.body
+
         self._build_home_tab()
         self._build_settings_tab()
+        self._apply_theme()
+
+    def _update_monitor_label(self):
+        text = "自动更新已开启" if self.auto_generate.get() else "自动更新已暂停"
+        self.monitor_label.configure(text=text)
 
     def _build_home_tab(self):
-        # 1. Master Scrollable Canvas for Home Tab
-        canvas = tk.Canvas(self.tab_home, borderwidth=0, highlightthickness=0)
-        self.home_canvas = canvas
-        v_scrollbar = ttk.Scrollbar(self.tab_home, orient="vertical", command=canvas.yview)
-        
-        self.home_scrollable_frame = ttk.Frame(canvas)
-        
-        self.home_scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        # Configure canvas to resize inner frame width to match canvas width
-        canvas.bind(
-            "<Configure>",
-            lambda e: canvas.itemconfig(window_id, width=e.width)
-        )
-        
-        window_id = canvas.create_window((0, 0), window=self.home_scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=v_scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        v_scrollbar.pack(side="right", fill="y")
-        
-        # Add Mousewheel support for the entire Home Tab canvas
-        def _on_mousewheel(event):
-            # Prevent scrolling canvas if hovering over a Treeview (let Treeview scroll itself)
-            if "treeview" in str(event.widget).lower():
-                return
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            
-        self.tab_home.bind("<Enter>", lambda e: self.tab_home.bind_all("<MouseWheel>", _on_mousewheel))
-        self.tab_home.bind("<Leave>", lambda e: self.tab_home.unbind_all("<MouseWheel>"))
-        
         # Source Files
-        s_frame = ttk.LabelFrame(self.home_scrollable_frame, text=" 第一步：导入需要构建词库的 Markdown 笔记源 ", padding="15")
-        s_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        s_frame = ttk.LabelFrame(self.home_scrollable_frame, text=" 笔记来源 ", padding=(12, 9))
+        s_frame.pack(fill=tk.X, pady=(0, 9))
         
         tree_frame = ttk.Frame(s_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
-        self.s_tree = ttk.Treeview(tree_frame, columns=("path", "status", "action"), show="headings", height=5)
-        self.s_tree.heading("path", text="目标路径 (支持单独文件或整个库文件夹)", anchor='w')
-        self.s_tree.heading("status", text="监控状态", anchor='w')
+        self.s_tree = ttk.Treeview(tree_frame, columns=("path", "status", "action"), show="headings", height=3, selectmode="browse")
+        self.s_tree.heading("path", text="文件或文件夹路径", anchor='w')
+        self.s_tree.heading("status", text="状态", anchor='w')
         self.s_tree.heading("action", text="操作", anchor='c')
         self.s_tree.column("path", anchor='w')
-        self.s_tree.column("status", width=80, anchor='w')
-        self.s_tree.column("action", width=80, anchor='c')
+        self.s_tree.column("status", width=76, minwidth=64, stretch=False, anchor="w")
+        self.s_tree.column("action", width=66, minwidth=60, stretch=False, anchor="c")
         
         s_tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.s_tree.yview)
         self.s_tree.configure(yscrollcommand=s_tree_scroll.set)
@@ -228,10 +223,12 @@ class KvTreeAppUI(tk.Tk):
         s_tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.s_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.s_tree.bind("<Button-1>", self.on_s_tree_click)
+        self.s_tree.bind("<Return>", lambda event: self._open_source(self.s_tree.focus()))
+        self.s_tree.bind("<Control-c>", lambda event: self._copy_tree_path(self.s_tree))
         
         sf_btns = ttk.Frame(s_frame)
         sf_btns.pack(fill=tk.X, side=tk.BOTTOM)
-        btn_add_f = ttk.Button(sf_btns, text="添加文件", command=self.add_files)
+        btn_add_f = ttk.Button(sf_btns, text="添加文件", style="Accent.TButton", command=self.add_files)
         btn_add_f.pack(side=tk.LEFT, padx=(0, 5))
         ToolTip(btn_add_f, "支持多选，直接将指定的单个或多个 .md 笔记文件加入监控列表")
         
@@ -239,7 +236,7 @@ class KvTreeAppUI(tk.Tk):
         btn_add_d.pack(side=tk.LEFT, padx=5)
         ToolTip(btn_add_d, "推荐！一键导入整个目录（如 Obsidian/Logseq 库目录），程序会自动扫描目录下的所有 .md 文件")
         
-        btn_toggle = ttk.Button(sf_btns, text="启/禁", command=self.toggle_s)
+        btn_toggle = ttk.Button(sf_btns, text="启用 / 停用", command=self.toggle_s)
         btn_toggle.pack(side=tk.LEFT, padx=5)
         ToolTip(btn_toggle, "暂时停止或恢复对选中文件的监控与词库生成功能")
         
@@ -247,57 +244,52 @@ class KvTreeAppUI(tk.Tk):
         btn_rm.pack(side=tk.LEFT, padx=(5, 0))
         ToolTip(btn_rm, "将选中项从列表中彻底移除，停止为其生成独立词库")
 
-        # Output Space (Table)
-        o_frame = ttk.LabelFrame(self.home_scrollable_frame, text=" 第二步：设置转换后 QuickKV 词库 (.md) 的保存位置 ", padding="15")
-        o_frame.pack(fill=tk.X, pady=10)
-        
-        o_tree_subframe = ttk.Frame(o_frame)
-        o_tree_subframe.pack(fill=tk.X, expand=True, pady=(0, 10))
-        
-        self.o_tree = ttk.Treeview(o_tree_subframe, columns=("path", "clear", "open"), show="headings", height=1)
-        self.o_tree.heading("path", text="当前设定的导出目录与更新机制", anchor='w')
-        self.o_tree.heading("clear", text="危险区", anchor='c')
-        self.o_tree.heading("open", text="操作", anchor='c')
-        self.o_tree.column("path", anchor='w')
-        self.o_tree.column("clear", width=120, anchor='c')
-        self.o_tree.column("open", width=80, anchor='c')
-        
-        o_tree_scroll = ttk.Scrollbar(o_tree_subframe, orient="vertical", command=self.o_tree.yview)
-        self.o_tree.configure(yscrollcommand=o_tree_scroll.set)
-        o_tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.o_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        self.o_tree.bind("<Button-1>", self.on_o_tree_click)
-        
-        o_btn_frame = ttk.Frame(o_frame)
-        o_btn_frame.pack(fill=tk.X)
-        btn_out = ttk.Button(o_btn_frame, text="📁 更改导出目录...", command=self.select_o)
-        btn_out.pack(side=tk.LEFT)
-        ToolTip(btn_out, "设置转换后的词库文件最终要保存在哪里（建议直接选为 QuickKV 的自动载入词库目录）")
-        
-        btn_rescan = ttk.Button(o_btn_frame, text="🚀 立即全量扫描并重建词库", command=self.confirm_and_queue_rescan)
-        btn_rescan.pack(side=tk.RIGHT, padx=5)
-        ToolTip(btn_rescan, "强制全盘重新读取一遍所有笔记文档，并覆写生成最新的词库。建议在调整排除规则或更改目录后手动点一次")
-        
-        cb_auto = ttk.Checkbutton(o_btn_frame, text="后台自动更新 (修改源笔记时自动导出)", variable=self.auto_generate, command=self.toggle_mon)
-        cb_auto.pack(side=tk.RIGHT, padx=10)
-        ToolTip(cb_auto, "打勾后，您只需在笔记软件里正常修改内容并按下 Ctrl+S 保存，KVT 会在几秒钟内自动帮您无感更新词库数据")
-        
+        self.sources_summary = ttk.Label(sf_btns, style="Muted.TLabel")
+        self.sources_summary.pack(side=tk.RIGHT)
+
+        output = ttk.LabelFrame(self.home_scrollable_frame, text=" 导出目录 ", padding=(12, 9))
+        output.pack(fill=tk.X, pady=(0, 9))
+        path_row = ttk.Frame(output)
+        path_row.pack(fill=tk.X)
+        self.output_directory = tk.StringVar()
+        ttk.Entry(path_row, textvariable=self.output_directory, state="readonly").pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8)
+        )
+        ttk.Button(path_row, text="更改目录", command=self.select_o).pack(side=tk.LEFT)
+        ttk.Button(path_row, text="打开目录", command=self.open_output_directory).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(path_row, text="删除已导出", style="Danger.TButton",
+                   command=self.confirm_delete_exports).pack(side=tk.LEFT, padx=(6, 0))
+
+        self.output_warning = ttk.Label(output, style="Warning.TLabel",
+                                        text="导出目录位于笔记源内，生成的词库可能会被再次扫描。")
+        self.output_warning.pack(anchor="w", pady=(6, 0))
+        self.output_warning.pack_forget()
+
+        controls = ttk.Frame(output)
+        controls.pack(fill=tk.X, pady=(7, 0))
+        ttk.Checkbutton(controls, text="后台自动更新", variable=self.auto_generate,
+                        command=self.toggle_mon).pack(side=tk.LEFT)
+        rescan = ttk.Button(controls, text="全量扫描并重建", command=self.confirm_and_queue_rescan)
+        rescan.pack(side=tk.RIGHT)
+        ToolTip(rescan, "重新读取启用的笔记，更新所有受影响的词库。")
+
         # Results View
-        g_frame = ttk.LabelFrame(self.home_scrollable_frame, text=" 最终生成的 QuickKV 词库状态预览 ", padding="15")
-        g_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        g_frame = ttk.LabelFrame(self.home_scrollable_frame, text=" 词库预览 ", padding=(12, 9))
+        g_frame.pack(fill=tk.X)
         g_tree_subframe = ttk.Frame(g_frame)
         g_tree_subframe.pack(fill=tk.BOTH, expand=True)
         
-        self.g_tree = ttk.Treeview(g_tree_subframe, columns=("output", "name", "source", "path", "action"), show="headings", height=5)
-        self.g_tree.heading("output", text="是否导出？", anchor='w')
-        self.g_tree.heading("name", text="生成的词库名", anchor='w')
+        self.g_tree = ttk.Treeview(g_tree_subframe, columns=("output", "name", "source", "path", "action"), show="headings", height=6, selectmode="browse")
+        self.g_tree.heading("output", text="导出", anchor='w')
+        self.g_tree.heading("name", text="词库名称", anchor='w')
         self.g_tree.heading("source", text="词库数据来源", anchor='w')
-        self.g_tree.heading("path", text="已生成文件的真实路径", anchor='w')
+        self.g_tree.heading("path", text="文件路径", anchor='w')
         self.g_tree.heading("action", text="操作", anchor='c')
-        self.g_tree.column("output", width=80, anchor='c')
-        self.g_tree.column("action", width=80, anchor='c')
-        self.g_tree.column("source", width=200)
+        self.g_tree.column("output", width=62, minwidth=58, stretch=False, anchor="c")
+        self.g_tree.column("name", width=182, minwidth=120)
+        self.g_tree.column("source", width=145, minwidth=92)
+        self.g_tree.column("path", width=290, minwidth=130)
+        self.g_tree.column("action", width=66, minwidth=60, stretch=False, anchor="c")
         
         g_tree_scroll = ttk.Scrollbar(g_tree_subframe, orient="vertical", command=self.g_tree.yview)
         self.g_tree.configure(yscrollcommand=g_tree_scroll.set)
@@ -305,6 +297,9 @@ class KvTreeAppUI(tk.Tk):
         self.g_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         self.g_tree.bind("<Button-1>", self.on_g_tree_click)
+        self.g_tree.bind("<space>", self._toggle_focused_export)
+        self.g_tree.bind("<Return>", lambda event: self._open_export(self.g_tree.focus()))
+        self.g_tree.bind("<Control-c>", lambda event: self._copy_tree_path(self.g_tree))
         self._source_tip = None
         self._source_tip_after = None
         self._source_tip_row = None
@@ -312,92 +307,80 @@ class KvTreeAppUI(tk.Tk):
         self.g_tree.bind('<Leave>', self._hide_source_tip)
         
         g_btn_frame = ttk.Frame(g_frame)
-        g_btn_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5)
-        btn_blacklist = ttk.Button(g_btn_frame, text="🚫 词库排除选择 (黑名单)", command=self.manage_blacklist)
-        btn_blacklist.pack(side=tk.LEFT, padx=5)
+        g_btn_frame.pack(fill=tk.X, pady=(8, 0))
+        self.outputs_summary = ttk.Label(g_btn_frame, style="Muted.TLabel")
+        self.outputs_summary.pack(side=tk.LEFT)
+        btn_blacklist = ttk.Button(g_btn_frame, text="词库黑名单", command=self.manage_blacklist)
+        btn_blacklist.pack(side=tk.RIGHT)
         ToolTip(btn_blacklist, "配置哪些词库标签要被永久剔除，不显示也不生成文件")
         
     def _build_settings_tab(self):
         opts = self.app_state.get_advanced_options()
-        rules = self.app_state.get_rules()
+        left = ttk.Frame(self.tab_settings, style="Page.TFrame")
+        right = ttk.Frame(self.tab_settings, style="Page.TFrame")
+        self.tab_settings.columnconfigure((0, 1), weight=1, uniform="settings")
+        left.grid(row=0, column=0, sticky="new", padx=(0, 6))
+        right.grid(row=0, column=1, sticky="new", padx=(6, 0))
 
-        # Split into two columns
-        left_col = ttk.Frame(self.tab_settings)
-        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
-        right_col = ttk.Frame(self.tab_settings)
-        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        rules = ttk.LabelFrame(left, text=" 数据清洗 ", padding=12)
+        rules.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(rules, text="按规则过滤整行，或替换行内匹配的文本。",
+                  style="Muted.TLabel").pack(anchor="w")
+        ttk.Button(rules, text="管理过滤规则", style="Accent.TButton",
+                   command=self.manage_rules).pack(anchor="w", pady=(8, 0))
 
-        # Left: Rules
-        rules_lf = ttk.LabelFrame(left_col, text=" 🧹 数据清洗与过滤规则 (高级正则表达式/双元替换) ", padding="15")
-        rules_lf.pack(fill=tk.BOTH, expand=True)
-        
-        info_lbl = ttk.Label(rules_lf, text="配置需要跳过提取的特定文本或正则（每条正则独立）：", style="Muted.TLabel")
-        info_lbl.pack(anchor="w", pady=(0, 10))
-        
-        btn_rules = ttk.Button(rules_lf, text="🪄 管理数据清洗与过滤规则", command=self.manage_rules)
-        btn_rules.pack(anchor="w", pady=5)
-        ToolTip(btn_rules, "点击打开双元替换清洗引擎配置面板")
-        
-        # Adding some helper text in the blank space
-        helper_text = "提示：\n• 如果你不想提取带有 'test' 的行，可以直接添加 'test'\n• 如果要高级过滤，可填写标准的正则语法"
-        ttk.Label(rules_lf, text=helper_text, style="Muted.TLabel", justify=tk.LEFT).pack(anchor="w", pady=(20, 0))
+        logseq = ttk.LabelFrame(left, text=" Logseq 属性扫描 ", padding=12)
+        logseq.pack(fill=tk.X)
+        self.scan_keys_var = tk.BooleanVar(value=opts.get("logseq_scan_keys", False))
+        self.scan_values_var = tk.BooleanVar(value=opts.get("logseq_scan_values", False))
+        self.scan_pure_values_var = tk.BooleanVar(value=opts.get("logseq_scan_pure_values", False))
+        for label, variable in (
+            ("提取属性键", self.scan_keys_var),
+            ("提取双方括号属性值", self.scan_values_var),
+            ("提取纯文本属性值", self.scan_pure_values_var),
+        ):
+            ttk.Checkbutton(logseq, text=label, variable=variable,
+                            command=self.save_settings_from_tab).pack(anchor="w", pady=3)
+        ttk.Button(logseq, text="管理 Logseq 排除属性键",
+                   command=self.manage_logseq_excludes).pack(anchor="w", pady=(8, 0))
 
-        # Right: Advanced Options
-        common_lf = ttk.LabelFrame(right_col, text=" ⚙️ 常规偏好 ", padding="15")
-        common_lf.pack(fill=tk.X, pady=(0, 15))
-        ttk.Button(common_lf, text='排除文件夹 / 文件路径',
-                   command=self.manage_excluded_paths).pack(anchor='w', pady=(0, 8))
-        appearance = ttk.Frame(common_lf)
+        common = ttk.LabelFrame(right, text=" 常规偏好 ", padding=12)
+        common.pack(fill=tk.X, pady=(0, 10))
+        appearance = ttk.Frame(common)
         appearance.pack(anchor="w", pady=(0, 5))
         ttk.Label(appearance, text="外观主题").pack(side=tk.LEFT, padx=(0, 10))
         for label, value in (("亮色", "light"), ("暗色", "dark")):
             ttk.Radiobutton(appearance, text=label, value=value, variable=self.theme_var,
                             command=self._change_theme).pack(side=tk.LEFT, padx=(0, 8))
-        
+
         self.run_on_startup_var = tk.BooleanVar(value=opts.get("run_on_startup", False))
-        ttk.Checkbutton(common_lf, text="系统启动时自启", variable=self.run_on_startup_var).pack(anchor="w", pady=5)
-        
         self.minimize_to_tray_var = tk.BooleanVar(value=opts.get("minimize_to_tray", True))
-        ttk.Checkbutton(common_lf, text="关闭窗口时最小化到系统托盘", variable=self.minimize_to_tray_var).pack(anchor="w", pady=5)
+        for label, variable in (
+            ("随 Windows 启动", self.run_on_startup_var),
+            ("关闭窗口时隐藏到托盘", self.minimize_to_tray_var),
+        ):
+            ttk.Checkbutton(common, text=label, variable=variable,
+                            command=self.save_settings_from_tab).pack(anchor="w", pady=3)
+        ttk.Button(common, text="排除文件夹 / 文件路径",
+                   command=self.manage_excluded_paths).pack(anchor="w", pady=(8, 0))
 
-        logseq_lf = ttk.LabelFrame(right_col, text=" 📄 Logseq md属性扫描 ", padding="15")
-        logseq_lf.pack(fill=tk.X, pady=(0, 15))
-        
-        self.scan_keys_var = tk.BooleanVar(value=opts.get("logseq_scan_keys", False))
-        ttk.Checkbutton(logseq_lf, text="页内属性键录入为词条", variable=self.scan_keys_var, command=self.save_settings_from_tab).pack(anchor="w", pady=5)
-        
-        self.scan_values_var = tk.BooleanVar(value=opts.get("logseq_scan_values", False))
-        ttk.Checkbutton(logseq_lf, text="页内属性值录入为词条 (带[[]]的)", variable=self.scan_values_var, command=self.save_settings_from_tab).pack(anchor="w", pady=5)
-        
-        self.scan_pure_values_var = tk.BooleanVar(value=opts.get("logseq_scan_pure_values", False))
-        ttk.Checkbutton(logseq_lf, text="页内属性值录入为词条 (无[[]]的纯文本)", variable=self.scan_pure_values_var, command=self.save_settings_from_tab).pack(anchor="w", pady=5)
-        
-        btn_ls_exclude = ttk.Button(logseq_lf, text="🚫 管理要排除的 Logseq 属性键", command=self.manage_logseq_excludes)
-        btn_ls_exclude.pack(anchor="w", pady=(10, 0))
-        ToolTip(btn_ls_exclude, "遇到这些属性键时，转换器会直接忽略整行，不提取键也不提取值（例：alias, type）")
-
-        danger_lf = ttk.LabelFrame(right_col, text=" ⚠️ 危险操作区 ", padding="15")
-        danger_lf.pack(fill=tk.X, pady=(0, 15))
-        
-        self.clear_config_var = tk.BooleanVar(value=True)
-        self.clear_cache_var = tk.BooleanVar(value=True)
+        maintenance = ttk.LabelFrame(right, text=" 数据维护 ", padding=12)
+        maintenance.pack(fill=tk.X, pady=(0, 10))
+        self.clear_config_var = tk.BooleanVar(value=False)
+        self.clear_cache_var = tk.BooleanVar(value=False)
         self.clear_output_var = tk.BooleanVar(value=False)
-        
-        ttk.Checkbutton(danger_lf, text="清除设置与规则记录 (恢复出厂状态)", variable=self.clear_config_var).pack(anchor="w", pady=2)
-        ttk.Checkbutton(danger_lf, text="清除词库解析缓存 (解决由于缓存导致的树形刷新异常)", variable=self.clear_cache_var).pack(anchor="w", pady=2)
-        ttk.Checkbutton(danger_lf, text="删除已导出的词库文件 (清空当前输出目录下所有 KVT 词库)", variable=self.clear_output_var).pack(anchor="w", pady=2)
-        
-        btn_clear = ttk.Button(danger_lf, text="🗑️ 确认清除所选项", command=self.clear_personal_data)
-        btn_clear.pack(anchor="w", pady=(10, 0))
-        ToolTip(btn_clear, "一键抹除勾选的 KVT 数据。您的源笔记文件【绝对安全】，绝不受影响。")
+        for label, variable in (
+            ("重置设置和规则（同时清除解析缓存）", self.clear_config_var),
+            ("清除解析缓存", self.clear_cache_var),
+            ("删除已导出的词库文件", self.clear_output_var),
+        ):
+            ttk.Checkbutton(maintenance, text=label, variable=variable).pack(anchor="w", pady=3)
+        ttk.Button(maintenance, text="清除所选数据", style="Danger.TButton",
+                   command=self.clear_personal_data).pack(anchor="w", pady=(8, 0))
 
-        btn_frame = ttk.Frame(right_col)
-        btn_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=10)
-        
-        # Link label for github help
-        github_lbl = ttk.Label(btn_frame, text="❓ 帮助与更新 (GitHub)", style="Link.TLabel", cursor="hand2")
-        github_lbl.pack(side=tk.LEFT)
-        github_lbl.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/EllisMorrow/KV-Tree"))
+        ttk.Button(right, text="帮助与更新 · GitHub",
+                   command=lambda: webbrowser.open("https://github.com/EllisMorrow/KV-Tree")
+                   ).pack(anchor="w")
 
     def _on_ui_thread(self, callback):
         """Wrap callbacks invoked by worker threads for Tk-safe execution."""
@@ -471,9 +454,16 @@ class KvTreeAppUI(tk.Tk):
         self.dispatcher.put_task(("full_rescan",))
 
     def clear_personal_data(self):
+        if not any(var.get() for var in (self.clear_config_var, self.clear_cache_var, self.clear_output_var)):
+            messagebox.showinfo("清除数据", "请选择要清除的数据。", parent=self)
+            return
         msg = "这将清除您勾选的个人数据，重置软件。\n\n• 您的源 .md 笔记文件【绝不】受影响。\n• 清除后软件将立即退出，需要您手动重新打开。\n\n确认清除吗？"
         if messagebox.askyesno("⚠️ 危险操作确认", msg, icon='warning'):
             self.app_state.skip_save = True
+            self.tray_icon.stop()
+            self.file_monitor.stop()
+            self.dispatcher.stop()
+            output_root = self.app_state.get_output_path()
             data_dir = os.path.abspath("用户数据")
             config_path = os.path.join(data_dir, "kv_tree_config.json")
             cache_path = os.path.join(data_dir, "parsing_cache.json")
@@ -485,49 +475,42 @@ class KvTreeAppUI(tk.Tk):
                         os.remove(cache_path) # Force wipe cache to clear old absolute paths
                     self.app_state.set_output_path("")
                     self.app_state.set_rules({"line_rules": [], "content_rules": []})
-                    self.update_o_table()
+                    self.update_output_directory()
                     
                 if self.clear_cache_var.get() and os.path.exists(cache_path):
                     os.remove(cache_path)
                 if self.clear_output_var.get():
-                    import stat
-                    for f in self.app_state.get_active_outputs().keys():
-                        if os.path.exists(f):
-                            try:
-                                os.chmod(f, stat.S_IWRITE)
-                                os.remove(f)
-                            except Exception: pass
+                    _, errors = self.dispatcher.delete_active_exports(output_root)
+                    if errors:
+                        raise OSError("\n".join(errors))
             except Exception as e:
                 messagebox.showerror("清除失败", f"清除失败: {e}\n\n请手动删除对应文件。")
             else:
                 messagebox.showinfo("清除成功", "所选数据已被清除！\n程序即将退出，请手动重新运行。")
             
-            self.tray_icon.stop()
-            self.file_monitor.stop()
-            self.dispatcher.stop()
             self.destroy()
 
     def load_state_to_ui(self):
-        self.update_o_table()
+        self.update_output_directory()
         self.update_lists()
 
-    def update_o_table(self):
-        self.o_tree.delete(*self.o_tree.get_children())
-        out_path = self.app_state.get_output_path()
-        if not out_path or out_path == os.getcwd():
-            display_path = "< 未设定，请点击下方更改目录指定输出位置 >"
-        else:
-            display_path = out_path
-        self.o_tree.insert("", "end", iid="output-directory", values=(display_path, "🗑️ 删已有词库", "👁️ 打开"))
-        overlaps = out_path and out_path != os.getcwd() and any(
-            data.get("type") == "folder" and _is_within_folder(normalize(out_path), normalize(path))
-            for path, data in self.app_state.get_source_files().items()
+    def update_output_directory(self):
+        path = self.app_state.get_output_path()
+        if not path or path == os.getcwd():
+            self.output_directory.set("未设置导出目录")
+            self.output_warning.pack_forget()
+            return
+
+        self.output_directory.set(path)
+        resolved = normalize(path)
+        overlaps = any(
+            kind == "folder" and _is_within_folder(resolved, normalize(source))
+            for source, kind, _ in self.app_state.get_source_roots()
         )
-        self.o_tree.configure(height=2 if overlaps else 1)
         if overlaps:
-            self.o_tree.tag_configure("warning", foreground="#FFD081" if self.theme_var.get() == "dark" else "#925000")
-            self.o_tree.insert("", "end", tags=("warning",),
-                               values=("⚠ 导出目录在笔记源内，生成的词库可能被再次扫描。", "", ""))
+            self.output_warning.pack(anchor="w", pady=(6, 0))
+        else:
+            self.output_warning.pack_forget()
 
     def update_lists(self):
         self.update_source_list()
@@ -546,54 +529,78 @@ class KvTreeAppUI(tk.Tk):
     def show_error(self, title, msg):
         messagebox.showerror(title, msg)
 
-    def on_o_tree_click(self, event):
-        if self.o_tree.identify_region(event.x, event.y) != "cell": return
-        if self.o_tree.identify_row(event.y) != "output-directory": return
-        column_id = self.o_tree.identify_column(event.x)
-        if column_id not in ("#2", "#3"): return
-        
-        if column_id == "#3":
-            p = self.app_state.get_output_path()
-            if os.path.exists(p): os.startfile(p)
-            else: self.show_error("提示", "目录不存在！")
-        elif column_id == "#2":
-            if messagebox.askyesno("确认删除", "确认要删除输出目录下所有已生成的 KVT 词库吗？\n(您的源笔记绝对安全，这只会删除转换出的词库文件)"):
-                import stat
-                count = 0
-                for f in self.app_state.get_active_outputs().keys():
-                    if os.path.exists(f):
-                        try:
-                            os.chmod(f, stat.S_IWRITE)
-                            os.remove(f)
-                            count += 1
-                        except Exception: pass
-                # Let dispatcher re-sync UI logic natively
-                self.dispatcher.put_task(("initialize",))
-                messagebox.showinfo("删除完毕", f"已成功删除 {count} 个词库文件。")
+    def open_output_directory(self):
+        path = self.app_state.get_output_path()
+        if path and path != os.getcwd() and os.path.isdir(path):
+            self._open_path(path)
+        else:
+            self.show_error("打开目录", "请先设置有效的导出目录。")
+
+    def confirm_delete_exports(self):
+        path = self.app_state.get_output_path()
+        if not path or path == os.getcwd():
+            self.show_error("删除导出", "请先设置导出目录。")
+            return
+        if messagebox.askyesno("确认删除", f"删除以下目录中的 KVTree 导出文件？\n\n{path}", parent=self):
+            self.dispatcher.put_task(("delete_exports", path))
+
+    def _show_export_deletion_result(self, count, errors):
+        if errors:
+            self.show_error("部分词库未删除", f"已删除 {count} 个词库。\n" + "\n".join(errors))
+        else:
+            messagebox.showinfo("删除完毕", f"已成功删除 {count} 个词库文件。")
 
     def on_g_tree_click(self, event):
-        if self.g_tree.identify_region(event.x, event.y) != "cell": return
-        column_id = self.g_tree.identify_column(event.x)
-        if column_id == "#3":
-            self._hover_output_source(event)
+        if self.g_tree.identify_region(event.x, event.y) != "cell":
             return
-        if column_id not in ("#1", "#5"): return
-        item_id = self.g_tree.identify_row(event.y)
-        if not item_id: return
-        
-        if column_id == "#1":
-            basename = os.path.basename(item_id)
-            current_selection = self.app_state.get_output_selection()
-            is_checked = current_selection.get(basename, False)
-            self.app_state.set_output_selection(basename, not is_checked)
-            
-            self.dispatcher.put_task(("regenerate_output", item_id))
-            self.g_tree.set(item_id, 'output', '☐' if is_checked else '☑')
-        elif column_id == "#5":
-            if os.path.exists(item_id):
-                os.startfile(item_id)
-            else:
-                self.show_error("提示", "该词库文件尚未生成或已被删除。")
+        row = self.g_tree.identify_row(event.y)
+        column = self.g_tree.identify_column(event.x)
+        if not row:
+            return
+        if column == "#1":
+            self._toggle_export(row)
+        elif column == "#3":
+            self._hover_output_source(event)
+        elif column == "#5":
+            self._open_export(row)
+
+    def _toggle_focused_export(self, event):
+        self._toggle_export(self.g_tree.focus())
+        return "break"
+
+    def _toggle_export(self, path):
+        if not path or not self.g_tree.exists(path):
+            return
+        name = os.path.basename(path)
+        selected = not self.app_state.get_output_selection().get(name, False)
+        self.app_state.set_output_selection(name, selected)
+        self.dispatcher.put_task(("regenerate_output", path))
+        self.g_tree.set(path, "output", "☑" if selected else "☐")
+        self._update_outputs_summary()
+        if hasattr(self, "trigger_save_cb"):
+            self.trigger_save_cb()
+
+    def _open_path(self, path):
+        try:
+            os.startfile(path)
+        except OSError as error:
+            self.show_error("无法打开", str(error))
+
+    def _open_export(self, path):
+        if not path:
+            return
+        if os.path.isfile(path):
+            self._open_path(path)
+        else:
+            self.show_error("打开词库", "该词库文件尚未生成或已被删除。")
+
+    def _copy_tree_path(self, tree):
+        path = tree.focus()
+        if path:
+            self.clipboard_clear()
+            self.clipboard_append(path)
+            self.set_status(f"已复制路径：{path}")
+        return "break"
 
     def on_closing(self, from_tray=False):
         opts = self.app_state.get_advanced_options()
@@ -625,12 +632,8 @@ class KvTreeAppUI(tk.Tk):
                         all_possible_basenames.add(file)
             except OSError: pass
                 
-        # 3. Scan the entire cache for historical/lazy outputs
-        # Note: AppState handles cache mapping via ActiveOutputs now, but looking at raw cache gives absolute everything
-        for src, entry in self.dispatcher.cache_manager.cache_data.items():
-            for out_p in entry.get("outputs", {}).keys():
-                all_possible_basenames.add(os.path.basename(out_p))
-                
+        all_possible_basenames.update(self.dispatcher.cache_manager.get_output_names())
+
         dialog = BlacklistWindow(self, all_possible_basenames, self.app_state.get_blacklist)
         saved, new_blacklist = dialog.show()
         if saved:
@@ -640,8 +643,11 @@ class KvTreeAppUI(tk.Tk):
             for b in new_blacklist:
                 self.app_state.add_to_blacklist(b)
             
-            # Immediately queue a re-initialization so dispatcher will delete the files
-            self.dispatcher.put_task(("initialize",))
+            changed_names = current.symmetric_difference(new_blacklist)
+            if changed_names:
+                self.dispatcher.put_task(("initialize", changed_names))
+                if hasattr(self, 'trigger_save_cb'):
+                    self.trigger_save_cb()
 
     def manage_rules(self):
         from src.ui.components import DualRuleWindow
@@ -652,7 +658,7 @@ class KvTreeAppUI(tk.Tk):
         if saved_items is not None:
             if saved_items != current_rules:
                 self.app_state.set_rules(saved_items)
-                if messagebox.askyesno("更新", "数据清洗清洗已修改，是否立即全量重建跑一遍新规则？"):
+                if messagebox.askyesno("更新", "过滤规则已修改，是否立即重建词库？"):
                     self.dispatcher.put_task(("clear_cache",))
 
     def manage_logseq_excludes(self):
@@ -701,7 +707,7 @@ class KvTreeAppUI(tk.Tk):
             dialog.destroy()
         buttons = ttk.Frame(dialog, padding=12)
         buttons.pack(side='bottom', fill='x')
-        ttk.Button(buttons, text='保存', command=save).pack(side='right')
+        ttk.Button(buttons, text='保存', style="Accent.TButton", command=save).pack(side='right')
         ttk.Button(buttons, text='取消', command=dialog.destroy).pack(side='right', padx=8)
         editor_frame.pack(fill='both', expand=True, padx=12)
         dialog.bind('<Escape>', lambda event: dialog.destroy())
@@ -740,34 +746,45 @@ class KvTreeAppUI(tk.Tk):
             tip.overrideredirect(True)
             tip.attributes('-topmost', True)
             ttk.Label(tip, text='词库数据来源\n' + '\n'.join(sorted(roots)),
-                      padding=10, justify='left', wraplength=800).pack()
+                      style="Tooltip.TLabel", padding=10, justify='left', wraplength=680).pack()
             tip.update_idletasks()
             left = min(x, max(0, self.winfo_screenwidth() - tip.winfo_reqwidth()))
             top = y if y + tip.winfo_reqheight() <= self.winfo_screenheight() else y - tip.winfo_reqheight() - 24
             tip.geometry(f'{left:+d}{max(0, top):+d}')
         self._source_tip_after = self.after(450, show)
 
-    def _prepare_list_refresh(self):
-        # Runs on the dispatcher thread. Hover only reads the published index.
-        by_source = self.dispatcher.cache_manager.get_source_output_index()
-        by_output = {}
-        for path, data in self.app_state.get_source_files().items():
-            if not data.get('enabled'):
-                continue
-            entries = data.get('files', {}) if data.get('type') == 'folder' else (path,)
-            for entry in entries:
-                for output in by_source.get(normalize(entry), ()):
-                    by_output.setdefault(os.path.basename(output), set()).add(path)
-        self._on_ui_thread(self._apply_list_refresh)(by_output)
+    def _prepare_list_refresh(self, dirty_outputs=None):
+        cache = self.dispatcher.cache_manager
+        full_refresh = dirty_outputs is None
+        names = cache.get_output_names() if full_refresh else {
+            os.path.basename(path) for path in dirty_outputs
+        }
+        roots = [(path, normalize(path), kind)
+                 for path, kind in self.app_state.get_enabled_source_roots()]
+        changes = {
+            name: self.app_state.get_source_owners(cache.get_output_sources(name), roots)
+            for name in names
+        }
+        self._on_ui_thread(self._apply_list_refresh)(changes, full_refresh)
 
-    def _apply_list_refresh(self, by_output):
-        self._output_sources = by_output
+    def _apply_list_refresh(self, changes, full_refresh):
+        if not full_refresh and all(
+            roots == self._output_sources.get(name, set()) for name, roots in changes.items()
+        ):
+            return
+        if full_refresh:
+            self._output_sources.clear()
+        for name, roots in changes.items():
+            if roots:
+                self._output_sources[name] = roots
+            else:
+                self._output_sources.pop(name, None)
         self.update_lists()
 
     def update_generated_list(self):
         if hasattr(self, '_source_tip'):
             self._hide_source_tip()
-        self.g_tree.delete(*self.g_tree.get_children())
+        rows = {}
         active_outputs = self.app_state.get_active_outputs()
         output_selection = self.app_state.get_output_selection()
         blacklist = self.app_state.get_blacklist()
@@ -788,19 +805,56 @@ class KvTreeAppUI(tk.Tk):
                 display_source = os.path.basename(next(iter(roots))) if len(roots) == 1 else f"{len(roots)} 个导入来源"
             elif display_source == "多元":
                 display_source = "词库来源"
-            self.g_tree.insert("", "end", iid=f_path, values=(check_char, basename, display_source, f_path, "👁️ 打开"))
+            rows[f_path] = (check_char, basename, display_source, f_path, "打开")
+        self._sync_tree_rows(self.g_tree, rows)
+        self.g_tree.configure(height=max(2, min(6, len(rows))))
+        self._update_outputs_summary()
+
+    def _update_outputs_summary(self):
+        items = self.g_tree.get_children()
+        if not items:
+            self.outputs_summary.configure(text="暂无词库 · 在笔记行末添加 #KV树-名称")
+            return
+        selected = self.app_state.get_output_selection()
+        checked = sum(bool(selected.get(os.path.basename(item))) for item in items)
+        self.outputs_summary.configure(text=f"{len(items)} 个词库 · 已勾选 {checked} 个导出")
+
+    @staticmethod
+    def _sync_tree_rows(tree, rows):
+        # Updating rows in place retains selection, focus and scroll position.
+        previous = tree.get_children()
+        existing = set(previous)
+        removed = existing - rows.keys()
+        if removed:
+            tree.delete(*removed)
+        retained = existing & rows.keys()
+        reorder = ([item for item in previous if item in retained]
+                   != [item for item in rows if item in retained])
+        for index, (item, values) in enumerate(rows.items()):
+            tags = ("stripe",) if index % 2 else ()
+            if item not in retained:
+                tree.insert("", index, iid=item, values=values, tags=tags)
+            else:
+                if reorder:
+                    tree.move(item, "", index)
+                if tree.item(item, "values") != values or tree.item(item, "tags") != tags:
+                    tree.item(item, values=values, tags=tags)
 
     def _restart_monitor_if_auto(self):
         if self.auto_generate.get():
             self.file_monitor.start()
 
     def update_source_list(self):
-        self.update_o_table()
-        self.s_tree.delete(*self.s_tree.get_children())
-        sources = self.app_state.get_source_files()
-        for p, d in sources.items():
-            display_text = f"[{d.get('type', 'file').upper()}] {p}"
-            self.s_tree.insert("", "end", iid=p, values=(display_text, "启用" if d.get("enabled") else "禁用", "👁️ 打开"))
+        self.update_output_directory()
+        roots = self.app_state.get_source_roots()
+        rows = {
+            path: (f"[{'文件夹' if kind == 'folder' else '文件'}] {path}", "已启用" if enabled else "已停用", "打开")
+            for path, kind, enabled in roots
+        }
+        self._sync_tree_rows(self.s_tree, rows)
+        self.s_tree.configure(height=max(2, min(3, len(rows))))
+        enabled = sum(bool(active) for _, _, active in roots)
+        self.sources_summary.configure(text=f"{enabled} / {len(roots)} 个来源已启用" if roots else "尚未添加笔记来源")
 
     def add_files(self):
         files = filedialog.askopenfilenames(title="选择.md文件", filetypes=(("Markdown", "*.md"), ("All files", "*.*")))
@@ -818,7 +872,9 @@ class KvTreeAppUI(tk.Tk):
 
     def add_folder(self):
         folder_path = filedialog.askdirectory(title="选择文件夹")
-        if folder_path: folder_path = os.path.normpath(folder_path)
+        if not folder_path:
+            return
+        folder_path = os.path.normpath(folder_path)
         if folder_path in self.app_state.get_source_files(): 
             messagebox.showinfo("提示", "该文件夹已在源列表中。")
             return
@@ -844,15 +900,16 @@ class KvTreeAppUI(tk.Tk):
         item_id = self.s_tree.identify_row(event.y)
         if not item_id: return
         
-        # open the file or its folder
-        path_to_open = item_id
-        if os.path.isfile(path_to_open):
-            path_to_open = os.path.dirname(path_to_open)
-            
-        if os.path.exists(path_to_open):
-            os.startfile(path_to_open)
+        self._open_source(item_id)
+
+    def _open_source(self, path):
+        if not path:
+            return
+        target = os.path.dirname(path) if os.path.isfile(path) else path
+        if os.path.isdir(target):
+            self._open_path(target)
         else:
-            self.show_error("提示", "该路径已经不存在于磁盘中。")
+            self.show_error("打开来源", "该来源路径已经不存在。")
 
     def remove_s(self):
         selected_id = self.s_tree.focus()
@@ -893,7 +950,7 @@ class KvTreeAppUI(tk.Tk):
         p = filedialog.askdirectory()
         if p: 
             self.app_state.set_output_path(p)
-            self.update_o_table()
+            self.update_output_directory()
             self.dispatcher.put_task(("full_rescan",))
 
     def toggle_mon(self):
@@ -902,8 +959,13 @@ class KvTreeAppUI(tk.Tk):
         opts["auto_generate"] = is_auto
         self.app_state.update_advanced_options(opts)
         
-        if is_auto: self.file_monitor.start()
-        else: self.file_monitor.stop()
+        self._update_monitor_label()
+        if is_auto:
+            self.file_monitor.start()
+        else:
+            self.file_monitor.stop()
+        if hasattr(self, "trigger_save_cb"):
+            self.trigger_save_cb()
 
     def confirm_and_queue_rescan(self):
         if messagebox.askyesno("重建确认", "将全量重构词库，期间后台运行，确认执行吗？"):

@@ -1,54 +1,43 @@
-# KVTree：您的终极 QuickKV 词库可视化管理器
+<h1 align="center">KVTree</h1>
 
-<img alt="image" src="https://github.com/user-attachments/assets/88227df4-11f8-4e5b-bd1c-5e598b8a6b36" />
-
-KVTree (KVT) 是一款桌面端效率工具，专为 [QuickKV (QKV)](https://github.com/EllisMorrow/QuickKV) 用户设计。它允许您在 Markdown 笔记软件（如 Obsidian、Logseq、Typora）中，通过无序列表（大纲）树管理词库。
-
-KVT 会在后台静默运行，自动将您笔记中的大纲结构实时编译为 QuickKV 标准词库并输出到指定目录。无论是十几个词条还是百万量级的海量数据，**KVTree 都能让您对“词库里到底有什么词”了如指掌**。
-
+<p align="center">把 Markdown 笔记中的大纲转换为 QuickKV 词库。</p>
 
 <p align="center">
-  <a href="https://github.com/EllisMorrow/KV-Tree/releases/latest"><img src="https://img.shields.io/github/v/release/EllisMorrow/KV-Tree"></a>
-  <a href="https://github.com/EllisMorrow/KV-Tree/commits/main"><img src="https://img.shields.io/github/last-commit/EllisMorrow/KV-Tree/main"></a>
-  <a href="https://github.com/EllisMorrow/KV-Tree/releases"><img src="https://img.shields.io/github/downloads/EllisMorrow/KV-Tree/total?label=Downloads&color=brightgreen"></a>
+  <a href="https://github.com/EllisMorrow/KV-Tree/releases/latest"><img alt="最新发布版本" src="https://img.shields.io/github/v/release/EllisMorrow/KV-Tree"></a>
+  <a href="https://github.com/EllisMorrow/KV-Tree/commits/main"><img alt="主分支最近提交" src="https://img.shields.io/github/last-commit/EllisMorrow/KV-Tree/main"></a>
+  <a href="https://github.com/EllisMorrow/KV-Tree/releases"><img alt="累计下载量" src="https://img.shields.io/github/downloads/EllisMorrow/KV-Tree/total?label=Downloads&color=brightgreen"></a>
 </p>
 
 <p align="center">
-  <b>📖 <a href="CHANGELOG.md">查看 KVTree 更新日志 (CHANGELOG)</a></b>
+  <a href="https://github.com/EllisMorrow/KV-Tree/releases/latest"><strong>下载 Windows 版</strong></a> ·
+  <a href="#快速上手">快速上手</a> ·
+  <a href="#进阶设置">进阶设置</a> ·
+  <a href="#从源码运行">从源码运行</a> ·
+  <a href="CHANGELOG.md">更新日志</a>
 </p>
 
----
+<p align="center">
+  <a href="assets/workflow.png"><img alt="从 Markdown 大纲提取词条，在 KVTree 中勾选导出，再到 QuickKV 搜索" src="assets/workflow.png" width="820"></a>
+</p>
 
-## ✨ 核心特性
+KVTree 适用于在 Obsidian、Logseq 或 Typora 中维护 Markdown 笔记的 [QuickKV](https://github.com/EllisMorrow/QuickKV) 用户。笔记保留原有层级，导出后的每个词条都可以在 QuickKV 中独立搜索。
 
-- **⚡ 无感热更新**：开启自动监控后，您在 Obsidian/Logseq 按下 `Ctrl+S` 的瞬间，KVTree 会在后台亚秒级完成增量扫描，并将最新词库同步完毕。
-- **⚙️ 双引擎过滤控制面板**: 独家原创的“内容剔除”与“整行屏蔽”双选面板，取代老旧的繁琐输入框。支持一行一行分离并配置专属正则黑名单，像剥洋葱一样剥除您笔记中的废话！
-- **💻 无级平滑体验**: 原生级渲染系统支持通过鼠标滚轮无限滑动超大数据集列表，并能在关掉后自动记忆您的偏好窗口大小，无需反复拖拽。
-- **🌲 智能 AST 树形解析**：通过树形结构识别 `单行`、`父与子`、`不包含父` 三种提取逻辑。
-- **外观与来源预览**：在「偏好与高级设置 → 常规偏好」切换亮色或暗色主题。将鼠标停在预览表的「词库数据来源」列可查看参与生成的完整导入路径。
-- **路径排除**：在「常规偏好 → 排除文件夹 / 文件路径」每行填写一项。默认跳过 `.stversions`、`.tine-trash`、`.trash`、`.recycle`、`bak`、`.stfolder`、`.obsidian` 及其子内容。规则同时用于首次扫描、重建和后台更新。
-- **标签与同步**：行内反引号和围栏代码块中的 `#KV树-名称` 按正文处理。启动会核对源目录，禁用源会撤下它贡献的内容。全量重建会清理失去来源的旧词库。若导出位置在笔记源目录内，「第二步」会显示提示。
-- **🛡️ 安全写入与路径约束**：输出、配置和缓存采用同目录临时文件替换；所有生成与删除操作都会校验目标仍位于用户选择的输出目录内。
-- **🎨 现代化 Fluent 交互设计**：完全摒弃传统丑陋的开源脚本界面。全面引入微软 Fluent Design 设计语言，双标签页布局，带有详尽的悬浮提示帮助（Tips），真正实现“小白式”体验。
-- **🔎 支持 Logseq md 版键值识别**：独家支持页面**任意位置**的属性键与值扫描（如键 `keys::` 和值 `[[values]]`），让 Logseq 用户的属性键或带双方的值也能瞬间转化为 QKV 高频词条，方便复用 Logseq md的键值。
+## 快速上手
 
----
+### 1. 在笔记中标记词条
 
-## 🚀 极速上手指南
+在 Markdown 行尾添加 `#KV树-词库名称`。写在行内反引号或围栏代码块里的标签会按正文处理。
 
-一图看懂功能演示V0.5-V0.9版：
-<img alt="PixPin_2025-08-26_15-03-21" src="https://github.com/user-attachments/assets/5ca1791c-a537-4a8c-9f71-dd118ff7ff9c" />
-<img src="https://github.com/user-attachments/assets/a65d8d84-97b6-413e-89e9-0883df4dbcb9" />
+| 标签 | 提取范围 |
+| --- | --- |
+| `#KV树-词库名称` | 当前项 |
+| `#KV树-词库名称-父与子` | 当前项和符合规则的子项 |
+| `#KV树-词库名称-不包含父` | 符合规则的子项 |
 
-### 第 1 步：标记您的笔记
-在任意 `.md` 笔记的行尾，打上 `#KV树-自定义词库名称` 格式的标签。如果不使用时用` ` `反引号进行包裹或使用上下被Markdown代码块（三个反引号）包裹，程序就不会识别。
+子项使用自己的块级标签时，由它自己的标签决定该分支的归属。
 
-**提取模式后缀介绍：**
-- **默认（无后缀）**：仅将当前这一行提取为单条词条。
-- **`-父与子`**：将当前无序列表节点 **及其所有子节点** 全部分别提取为词条。
-- **`-不包含父`**：**跳过**当前节点，仅将其下方的所有子节点提取为独立词条。
+**笔记示例 · `待办事项.md`**
 
-**举个例子 `待办事项.md`：**
 ```markdown
 - 工作项目 #KV树-我的项目-父与子
     - 撰写报告
@@ -58,113 +47,98 @@ KVT 会在后台静默运行，自动将您笔记中的大纲结构实时编译�
     - 漫步华尔街
 ```
 
-### 第 2 步：一键生成
-1. 运行 `kv_tree_app.py` 启动 KVT 控制台界面。
-2. **添加笔记源**：点击“添加文件”或“添加文件夹”，将刚才的 `待办事项.md`（或您整个笔记库文件夹）加入左侧监控列表。
-3. **设置输出目录**：建议直接选择 [QuickKV](https://github.com/EllisMorrow/QuickKV) 软件本体下的自动载入文件夹。
-4. **启动引擎**：点击【🚀 立即全量扫描并重建词库】！
+### 2. 预览并导出
 
-后台自动更新会等待约 2 秒合并连续保存。持续有变动时，处理线程可用后会在约 10 秒的批次等待上限到达时开始处理。完成后，指定目录下会生成可供 QuickKV 读取的纯文本词库：
+1. **启动 KVTree。** 完整解压发布包，然后双击 `KVTree.exe`，保留旁边的 `_internal/`。
+2. **添加笔记来源。** 点击「添加文件」或「添加文件夹」。
+3. **设置输出目录。** 若希望由 QuickKV 自动载入，选择 QuickKV 配置的词库目录。
+4. **勾选导出。** 等待词库预览出现，或点击「全量扫描并重建」。在预览表中勾选要写入磁盘的词库。新发现的词库默认未勾选。
 
-**`#KV树-我的项目.md`**:
+### 3. 查看输出结果
+
+KVTree 将每项写成一行顶格的 `- 词条`，合并多个来源后去重并按文本排序。
+
+**`#KV树-我的项目.md`**
+
 ```markdown
+- 回复邮件
 - 工作项目
 - 撰写报告
-- 回复邮件
 ```
 
-**`#KV树-我的读书.md`**:
+**`#KV树-我的读书.md`**
+
 ```markdown
-- 聪明的投资者
 - 漫步华尔街
+- 聪明的投资者
 ```
 
----
+## 操作演示
 
-## 🛠️ 纯净运行环境（官方推荐）
+**界面参考**
 
-为了避免依赖冲突卡顿和数据污染，KVT 为您配置了标准化的 Python 独立虚拟环境（`venv`）。
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/88227df4-11f8-4e5b-bd1c-5e598b8a6b36"><img alt="KVTree 主界面预览" src="https://github.com/user-attachments/assets/88227df4-11f8-4e5b-bd1c-5e598b8a6b36" width="820"></a>
+</p>
 
-如果您获取了代码源码，请在主目录下使用终端执行此条命令启动，方可获得最沉浸、最稳固的运行体验：
+下面两张图保留了 V0.5–V0.9 的操作演示。当前版本按上面的步骤操作，点击图片可打开原图。
+
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/5ca1791c-a537-4a8c-9f71-dd118ff7ff9c"><img alt="KVTree 早期版本操作演示（上）" src="https://github.com/user-attachments/assets/5ca1791c-a537-4a8c-9f71-dd118ff7ff9c" width="390"></a>
+  <a href="https://github.com/user-attachments/assets/a65d8d84-97b6-413e-89e9-0883df4dbcb9"><img alt="KVTree 早期版本操作演示（下）" src="https://github.com/user-attachments/assets/a65d8d84-97b6-413e-89e9-0883df4dbcb9" width="390"></a>
+</p>
+
+## 进阶设置
+
+| 功能 | 使用方式 |
+| --- | --- |
+| 后台自动更新 | 勾选「后台自动更新」。程序通常等待约 2 秒合并保存事件，持续变更时批次等待上限约为 10 秒。任务积压和变更量会影响实际完成时间。 |
+| 正则过滤 | 在「偏好与高级设置」里配置「排除行」和「排除内容」，可按规则过滤整行或替换行内片段。 |
+| 路径排除 | 在「常规偏好 → 排除文件夹 / 文件路径」中每行填写一项，规则应用于扫描、重建和后台更新。 |
+| Logseq 属性提取 | 可扫描 Markdown 中的 `键::`、`[[值]]` 和纯文本属性值，并配置排除键。 |
+| 来源与外观 | 将鼠标停在「词库数据来源」列可查看完整来源路径。「常规偏好」支持亮色和暗色主题，程序退出时保存窗口位置与大小。 |
+
+默认排除目录为 `.stversions`、`.tine-trash`、`.trash`、`.recycle`、`bak`、`.stfolder` 和 `.obsidian`，这些目录的子内容也会被跳过。
+
+启动时会核对源目录，禁用来源会撤下它贡献的词条。全量重建会清理失去来源的旧词库。输出目录位于笔记源内时，界面会提示生成文件可能被再次扫描。词库、配置和缓存使用同目录临时文件替换，写入或删除词库前会校验输出目录边界。
+
+## 从源码运行
+
+在 Windows 上安装 Python 3.10 或更新版本，然后在项目根目录执行：
 
 ```powershell
-.\venv\Scripts\python kv_tree_app.py
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe kv_tree_app.py
 ```
 
-## 👨‍💻 开发者指南
+## 开发与构建
 
-本项目欢迎社区开发者参与贡献。以下是深入了解并参与 KVTree 开发的快速指南。
+### 运行测试
 
-### 安装与测试
+创建虚拟环境并安装运行依赖后，执行：
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
+.\venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试会在 GitHub Actions 的 Windows 环境中覆盖 Python 3.10 和 3.13。
+GitHub Actions 在 Windows 上覆盖 Python 3.10 和 3.13。
 
-### 🛠️ 技术栈 (Tech Stack)
-- **核心语言**: Python 3.10+
-- **GUI 框架**: Python 标准库 Tkinter（Windows 原生桌面界面）
-- **文件监控系统**: `watchdog` (实现毫秒级的无感热更新)
-- **数据管理层**: 标准化抽象语法树 (AST) 与本地缓存策略
-- **打包工具**: PyInstaller
+### 构建 Windows 可执行文件
 
-### 💡 核心技术点 (Core Technical Points)
-1. **智能 AST 树形解析 (`src/logic/ast_parser.py`)**: 摒弃脆弱的单纯正则匹配，采用自构建的多叉树（AST）模型精确还原 Markdown 无序列表的层级关系，精准支持提取“单节点”、“父与子”和“不包含父”等复杂逻辑。
-2. **多源多态数据处理 (`src/logic/logseq_parser.py`)**: 支持各类标准 Markdown 语法的通用解析，同时深度兼容 Logseq 的 `keys::` 页面属性范式，自动去重与过滤系统属性。
-3. **响应式状态管理 (`src/core/app_state.py`)**: 彻底将底层业务轮询状态与界面的渲染解耦，通过集中化的事件派发器 (`task_dispatcher.py`)，保证在扫描海量节点库时 UI 始终保持丝滑响应，避免主线程卡死阻塞。
-4. **亚秒级无感监控 (`src/logic/file_monitor.py`)**: 借助硬件级别的系统文件操作事件订阅（替代高开销的轮询），实现用户触发 `Ctrl+S` 时即刻增量更新目标词库。
-
-### 📁 项目结构 (Project Structure)
-目前 src 源码的推荐阅读顺序如下：
-```text
-KVTree/
-├── kv_tree_app.py        # 程序入口文件（包含主运行逻辑）
-├── README.md             # 项目说明文档
-├── CHANGELOG.md          # 更新日志
-└── src/                  # 核心源代码目录
-    ├── core/             # 核心应用状态机与总线（起点）
-    │   ├── app_state.py      # 全局状态字典与管理器
-    │   └── task_dispatcher.py# 任务异步分发与生命周期调度
-    ├── ui/               # 用户交互界面层（视图层）
-    │   ├── main_window.py    # 主窗体与双标签页视图入口
-    │   ├── components.py     # 可复用的 Fluent UI 按钮面板等控件
-    │   └── tray_icon.py      # 系统托盘与后台常驻模块
-    ├── logic/            # 业务逻辑与数据处理层（核心引擎）
-    │   ├── ast_parser.py     # 抽象语法树构建与解析器
-    │   ├── logseq_parser.py  # Logseq 专属属性解析特化处理
-    │   ├── file_monitor.py   # 后台文件修改热更新监控
-    │   ├── cache_manager.py  # 增量扫描缓存机制（防抖与提速）
-    │   └── config_manager.py # 用户配置的持久化与读取读写
-    └── utils/            # 通用基础工具类
-        └── file_utils.py     # 安全的文件读写落地与防损方案
+```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\venv\Scripts\python.exe -m PyInstaller KVTree.spec --noconfirm
 ```
 
-### 🧩 构建可执行文件 (Build EXE)
+构建采用 PyInstaller 文件夹模式（`onedir`）。分发时将整个 `dist/KVTree/` 目录打包，保留 `KVTree.exe` 和 `_internal/` 的相对位置。
 
-如果您想将其完全便携化发给朋友，在没有 Python 环境的电脑上绿色运行：
+### 源码导航
 
-1. 激活项目中自带的虚拟环境：
-   ```powershell
-   .\venv\Scripts\Activate.ps1
-   ```
-2. 安装已锁定版本的运行与编译依赖：
-   ```powershell
-   python -m pip install -r requirements-dev.txt
-   ```
-3. 使用项目自带的 spec 文件一键构建（**文件夹模式**）：
-   ```powershell
-   pyinstaller KVTree.spec --noconfirm
-   ```
-4. 构建完成后，产物位于 `dist/KVTree/` 目录：
-   ```text
-   dist/KVTree/
-   ├── KVTree.exe      ← 双击即启动，秒开！
-   └── _internal/      ← 运行时依赖（请勿删除）
-   ```
-5. 分发时，将整个 `KVTree/` 文件夹打包为 ZIP 即可。收到的人解压后双击 `KVTree.exe` 即可无痛运行。
-
-> [!CAUTION]
-> **请勿使用 `--onefile` 单文件模式构建！** 单文件模式会将所有依赖打包进一个巨型 EXE，每次启动时需解压到临时目录。在 Windows 10/11 下，Windows Defender 实时保护会对这些新解压出的 `.dll` / `.pyd` 文件逐一扫描，**导致首次启动延迟 1~5 分钟**，严重影响用户体验。文件夹模式（`onedir`）仅首次构建时写入文件，后续启动无需解压，可实现秒级冷启动。
+| 位置 | 职责 |
+| --- | --- |
+| [`kv_tree_app.py`](kv_tree_app.py) | 启动程序，加载配置和缓存 |
+| [`src/core/`](src/core/) | 共享状态、后台任务调度和导出 |
+| [`src/logic/`](src/logic/) | Markdown 与 Logseq 解析、文件监控、路径过滤和持久化 |
+| [`src/ui/`](src/ui/) | Tkinter 主界面、设置控件和系统托盘 |
+| [`src/utils/file_utils.py`](src/utils/file_utils.py) | 原子写入文件 |

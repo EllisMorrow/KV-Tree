@@ -5,7 +5,7 @@ a = Analysis(
     ['kv_tree_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.'), ('src', 'src')],
+    datas=[('icon.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

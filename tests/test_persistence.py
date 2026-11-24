@@ -40,6 +40,22 @@ class PersistenceTests(unittest.TestCase):
         for key in ("blacklist", "logseq_exclude_keys", "_logseq_seen_defaults"):
             self.assertEqual(app_data[key], loaded[key])
 
+    def test_invalid_config_shape_uses_defaults_and_preserves_valid_fields(self):
+        config_path = self.directory / "config.json"
+        config_path.write_text("[]", encoding="utf-8")
+        self.assertEqual({}, ConfigManager(config_path).load_config()["source_files"])
+        self.assertEqual("[]", config_path.read_text(encoding="utf-8"))
+
+        config_path.write_text(json.dumps({
+            "output_path": str(self.directory),
+            "advanced_options": [],
+            "source_files": {"broken": None, "notes": {"type": "folder", "files": None}},
+        }), encoding="utf-8")
+        config = ConfigManager(config_path).load_config()
+        self.assertEqual(str(self.directory), config["output_path"])
+        self.assertEqual({"notes": {"type": "folder", "files": {}}}, config["source_files"])
+        self.assertTrue(config["advanced_options"]["auto_generate"])
+
     def test_old_config_uses_defaults_for_new_persistence_fields(self):
         config_path = self.directory / "legacy.json"
         config_path.write_text(json.dumps({"source_files": {}}), encoding="utf-8")
@@ -78,6 +94,24 @@ class PersistenceTests(unittest.TestCase):
 
         self.assertEqual(original, cache_path.read_text(encoding="utf-8"))
         self.assert_no_json_temp_files()
+
+    def test_cache_load_keeps_valid_entries_when_other_entries_are_malformed(self):
+        cache_path = self.directory / "cache.json"
+        first, second, valid = (self.directory / name for name in ("a.md", "b.md", "c.md"))
+        output = str(self.directory / "export.md")
+        cache_path.write_text(json.dumps({
+            str(first): {"outputs": []},
+            str(second): {"outputs": {output: 123}},
+            str(valid): {"mtime": 1, "outputs": {output: "valid"}},
+            "<pending_exports>": [output, 123, "not-an-export.txt", "bad\x00.md"],
+        }), encoding="utf-8")
+
+        cache = CacheManager(cache_path)
+
+        self.assertIsNone(cache.get_entry(first))
+        self.assertIsNone(cache.get_entry(second))
+        self.assertEqual(("valid",), cache.get_output_contents(output))
+        self.assertEqual({output}, cache.get_pending_exports())
 
     def test_cache_load_normalizes_source_keys(self):
         cache_path = self.directory / "cache.json"

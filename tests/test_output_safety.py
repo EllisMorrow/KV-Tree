@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from src.core.app_state import AppState
@@ -59,6 +60,12 @@ class _Cache:
         self.removed = []
         self.saved = 0
 
+    def get_output_paths(self):
+        return set(self.outputs)
+
+    def get_output_contents(self, path):
+        return (self.outputs[path],) if self.outputs.get(path) else ()
+
     def get_all_cached_paths(self):
         return [self.cached_path]
 
@@ -74,8 +81,12 @@ class _Cache:
     def remove_entry(self, path):
         self.removed.append(path)
 
-    def save_cache(self):
+    def get_pending_exports(self):
+        return set()
+
+    def save_cache(self, pending_exports=None):
         self.saved += 1
+        return True
 
 
 def _dispatcher(state, cache):
@@ -94,6 +105,23 @@ class OutputPathSafetyTests(unittest.TestCase):
         results, _ = AstParser().parse(text)
 
         self.assertEqual({"#KV树-安全.md": ["- safe"]}, dict(results))
+
+    def test_manual_delete_keeps_neighbor_directory_with_same_prefix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_root, neighbor = root / "out", root / "out-backup"
+            output_root.mkdir()
+            neighbor.mkdir()
+            inside, outside = output_root / "inside.md", neighbor / "outside.md"
+            inside.touch()
+            outside.write_text("keep", encoding="utf-8")
+            state = AppState({"output_path": str(output_root)})
+            state.set_active_outputs({str(inside): "generated", str(outside): "stale"})
+            dispatcher = TaskDispatcher(state, CacheManager(root / "cache.json"), {})
+
+            self.assertEqual((1, []), dispatcher.delete_active_exports())
+            self.assertFalse(inside.exists())
+            self.assertEqual("keep", outside.read_text(encoding="utf-8"))
 
     def test_outside_path_is_never_deleted_when_unselected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -217,6 +245,7 @@ class ParseFailureCacheTests(unittest.TestCase):
             self.assertEqual([], cache.updated)
             self.assertEqual([], cache.removed)
             self.assertEqual({output_path: "多元"}, state.active_outputs)
+            self.assertIn("1 个源文件读取失败，其中 1 个沿用旧缓存", callbacks["set_status"].call_args.args[0])
 
     def test_valid_empty_parse_replaces_cache(self):
         old = {"output/safe.md": "last good"}
@@ -233,7 +262,7 @@ class ParseFailureCacheTests(unittest.TestCase):
 
         self.assertEqual(old, previous)
         self.assertEqual({}, current)
-        self.assertEqual([("source.md", 123, {})], cache.updated)
+        self.assertEqual([("source.md", 123, {}, None)], cache.updated)
 
 
 class SourceRemovalTests(unittest.TestCase):

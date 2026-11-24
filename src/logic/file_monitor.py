@@ -1,5 +1,5 @@
 import os
-import time
+import stat
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -27,84 +27,53 @@ class AppEventHandler(FileSystemEventHandler):
         super().__init__()
         self.dispatcher = task_dispatcher
         self.state = app_state
-        self.last_event_time = {}
-
-    def _matching_sources(self, path):
-        """Return enabled sources that own this path, or no match.
-
-        A file included by an enabled folder remains in scope even if the same
-        path was also added separately and disabled; folder membership is an
-        independent user choice.
-        """
-        matches = []
-        for source_path, source_data in self.state.get_source_files().items():
-            if not source_data.get("enabled"):
-                continue
-            normalized_source = _normalize_path(source_path)
-            if source_data.get("type") == "folder":
-                if _is_within_folder(path, normalized_source):
-                    matches.append((source_path, source_data))
-            elif path == normalized_source:
-                matches.append((None, None))
-        return matches
 
     def process_event(self, event_type, path):
+        if not path:
+            return
         path = _normalize_path(path)
-        if is_excluded(path, self.state.get_excluded_paths()):
-            return
-        if not path.lower().endswith(".md"):
-            return
-
-        matching_sources = self._matching_sources(path)
-        if not matching_sources:
+        markdown = path.lower().endswith(".md")
+        if (not markdown and event_type not in ("deleted", "directory")) or is_excluded(path, self.state.get_excluded_paths()):
             return
 
-        self.last_event_time[path] = time.time()
-        self._sync_shadow_state(event_type, path, matching_sources)
-        self.dispatcher.put_task(("process_file", event_type, path))
+        folder_roots = []
+        matched_file = False
+        for source, kind in self.state.get_enabled_source_roots():
+            root = _normalize_path(source)
+            if kind == "folder":
+                if _is_within_folder(path, root):
+                    folder_roots.append(source)
+            elif root == path:
+                matched_file = True
+        if not folder_roots and not matched_file:
+            return
 
-    def _sync_shadow_state(self, event_type, path, matching_sources):
-        """Keep enabled folder snapshots in step with accepted events."""
-        for source_path, source_data in matching_sources:
-            if source_path is None:
-                continue
-
-            files = source_data.setdefault("files", {})
-            existing_path = next(
-                (stored_path for stored_path in files if _normalize_path(stored_path) == path),
-                None,
-            )
-            if event_type in ("created", "modified"):
+        if folder_roots and markdown and event_type != "directory":
+            if event_type == "deleted":
+                self.state.update_folder_members(folder_roots, path, None)
+            else:
                 try:
-                    current_mtime = os.path.getmtime(path)
+                    mtime = os.path.getmtime(path)
                 except OSError:
-                    continue
-                stored_path = existing_path or path
-                if files.get(stored_path) != current_mtime:
-                    files[stored_path] = current_mtime
-                    self.state.update_source_file(source_path, source_data)
-            elif event_type == "deleted" and existing_path is not None:
-                del files[existing_path]
-                self.state.update_source_file(source_path, source_data)
+                    pass  # The worker will check the file's final state.
+                else:
+                    self.state.update_folder_members(folder_roots, path, mtime)
+        self.dispatcher.put_task(("process_file", event_type, path))
 
     def on_modified(self, event):
         if not event.is_directory:
             self.process_event("modified", event.src_path)
 
     def on_created(self, event):
-        if not event.is_directory:
-            self.process_event("created", event.src_path)
+        self.process_event("directory" if event.is_directory else "created", event.src_path)
 
     def on_deleted(self, event):
-        if not event.is_directory:
-            self.process_event("deleted", event.src_path)
+        # Windows can report a removed directory as a file deletion.
+        self.process_event("deleted", event.src_path)
 
     def on_moved(self, event):
-        if not event.is_directory:
-            # Check each side independently: a file can move into or out of a
-            # watched source, and only the in-scope side should be queued.
-            self.process_event("deleted", event.src_path)
-            self.process_event("created", event.dest_path)
+        self.process_event("deleted", event.src_path)
+        self.process_event("directory" if event.is_directory else "created", event.dest_path)
 
 
 class FileMonitor:
@@ -115,30 +84,51 @@ class FileMonitor:
         self.state = app_state
         self.ui_cb = ui_callbacks
         self.observer = None
+        self._watch_signatures = None
+        self._targets = []
         self.event_handler = AppEventHandler(self.dispatcher, self.state)
+
+    def _watch_targets(self):
+        targets = []
+        for source, kind in self.state.get_enabled_source_roots():
+            path = _normalize_path(source)
+            recursive = kind == "folder"
+            targets.append((path if recursive else os.path.dirname(path), recursive))
+        return targets
+
+    @staticmethod
+    def _directory_signatures(targets):
+        signatures = {}
+        for path, _ in targets:
+            if path in signatures:
+                continue
+            try:
+                info = os.stat(path)
+            except (FileNotFoundError, NotADirectoryError):
+                signatures[path] = None
+            else:
+                signatures[path] = (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+        return signatures
+
+    def check_watches(self):
+        if self._watch_signatures is None:
+            return
+        signatures = self._directory_signatures(self._targets)
+        if signatures != self._watch_signatures:
+            self.start()
+            self.dispatcher.put_task(("initialize",))
 
     def start(self):
         """Start the smallest set of watches needed for enabled sources."""
         if self.observer and self.observer.is_alive():
             self.stop()
-
+        targets = self._watch_targets()
+        self._targets = targets
+        self._watch_signatures = {}
+        signatures = self._directory_signatures(targets)
         self.observer = Observer()
-        sources = self.state.get_source_files()
-        folder_roots = []
-        file_parents = []
-
-        for source_path, source_data in sources.items():
-            if not source_data.get("enabled"):
-                continue
-
-            normalized_source = _normalize_path(source_path)
-            if source_data.get("type") == "folder":
-                if os.path.isdir(normalized_source):
-                    folder_roots.append(normalized_source)
-            else:
-                parent = os.path.dirname(normalized_source)
-                if os.path.isdir(parent):
-                    file_parents.append(parent)
+        folder_roots = [path for path, recursive in targets if recursive and signatures[path] is not None]
+        file_parents = [path for path, recursive in targets if not recursive and signatures[path] is not None]
 
         # A recursive parent watch already covers all nested folder watches.
         recursive_roots = []
@@ -162,9 +152,11 @@ class FileMonitor:
             self.ui_cb['set_status'](f"监控已开启，正在监视 {watch_count} 个位置。")
         else:
             self.ui_cb['set_status']("监控开启，但无启用的源可供监视。")
+        self._watch_signatures = signatures
 
     def stop(self):
         """Stop monitoring."""
+        self._watch_signatures = None
         if self.observer and self.observer.is_alive():
             self.observer.stop()
             self.observer.join()

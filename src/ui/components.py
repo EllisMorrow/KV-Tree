@@ -1,5 +1,43 @@
+import re
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
+
+from src.logic.ast_parser import compile_rule
+
+class ScrollablePane(ttk.Frame):
+    """A vertically scrolling surface scoped to the window that owns it."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.body = ttk.Frame(self.canvas)
+        window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        self.body.bind("<Configure>", self._update_scroll_region)
+        self.canvas.bind("<Configure>", lambda event: self.canvas.itemconfigure(window, width=event.width))
+        self.winfo_toplevel().bind("<MouseWheel>", self._scroll, add="+")
+        scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+    def _update_scroll_region(self, event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _scroll(self, event):
+        if not self.winfo_ismapped():
+            return
+        widget = event.widget
+        while widget is not self and widget is not None:
+            if isinstance(widget, tk.Text):
+                return
+            if isinstance(widget, ttk.Treeview) and widget.yview() != (0.0, 1.0):
+                return
+            widget = widget.master
+        if widget is self and event.delta and self.canvas.yview() != (0.0, 1.0):
+            steps = max(1, abs(event.delta) // 120)
+            self.canvas.yview_scroll(-steps if event.delta > 0 else steps, "units")
+            return "break"
+
 
 class ToolTip(object):
     """
@@ -10,9 +48,9 @@ class ToolTip(object):
         self.text = text
         self.tipwindow = None
         self.id = None
-        self.x = self.y = 0
-        self.widget.bind("<Enter>", self.enter)
-        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<Enter>", self.enter, add="+")
+        self.widget.bind("<Leave>", self.leave, add="+")
+        self.widget.bind("<Destroy>", self.leave, add="+")
 
     def enter(self, event=None):
         self.schedule()
@@ -33,16 +71,20 @@ class ToolTip(object):
 
     def showtip(self, event=None):
         self.unschedule()
-        x, y, cx, cy = self.widget.bbox("insert") or (0,0,0,0)
-        x = self.widget.winfo_rootx() + 25
-        y = self.widget.winfo_rooty() + 20
-        self.tipwindow = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry("+%d+%d" % (x, y))
-        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
-                      background="#FFFFE0", relief=tk.SOLID, borderwidth=1,
-                      font=("Microsoft YaHei UI", 9, "normal"))
-        label.pack(ipadx=4, ipady=4)
+        if self.tipwindow or not self.widget.winfo_ismapped():
+            return
+        x = self.widget.winfo_rootx()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tipwindow = tip = tk.Toplevel(self.widget)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        ttk.Label(tip, text=self.text, style="Tooltip.TLabel",
+                  justify=tk.LEFT, padding=(10, 8), wraplength=320).pack()
+        tip.update_idletasks()
+        x = min(x, self.widget.winfo_screenwidth() - tip.winfo_reqwidth())
+        if y + tip.winfo_reqheight() > self.widget.winfo_screenheight():
+            y = self.widget.winfo_rooty() - tip.winfo_reqheight() - 6
+        tip.geometry(f"{max(x, 0):+d}{max(y, 0):+d}")
 
     def hidetip(self):
         tw = self.tipwindow
@@ -60,13 +102,14 @@ class DynamicListWindow(tk.Toplevel):
         self._center_window(parent)
         self.transient(parent)
         self.grab_set()
+        self.bind("<Escape>", lambda event: self.destroy())
         
         self.placeholder = placeholder
         self.rows = []  # [(row_frame, entry_var, badge_lbl), ...]
         self._grid_row_idx = 0  # grid 行计数器
         
         # Header Info
-        info_lbl = ttk.Label(self, text=instruction, foreground="gray", justify=tk.LEFT, wraplength=710)
+        info_lbl = ttk.Label(self, text=instruction, style="Muted.TLabel", justify=tk.LEFT, wraplength=710)
         info_lbl.pack(anchor="w", padx=15, pady=(15, 2))
         
         # 前缀匹配说明
@@ -78,43 +121,25 @@ class DynamicListWindow(tk.Toplevel):
         toolbar = ttk.Frame(self)
         toolbar.pack(fill=tk.X, padx=15, pady=(0, 5))
         
-        ttk.Label(toolbar, text="🔍").pack(side=tk.LEFT)
+        ttk.Label(toolbar, text="搜索", style="Muted.TLabel").pack(side=tk.LEFT)
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", self._on_search_changed)
         search_entry = ttk.Entry(toolbar, textvariable=self.search_var, font=("Consolas", 10))
         search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 10))
         
         self.match_count_var = tk.StringVar(value="")
-        ttk.Label(toolbar, textvariable=self.match_count_var, foreground="gray", font=("", 9)).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(toolbar, textvariable=self.match_count_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(0, 10))
         
-        btn_sort = ttk.Button(toolbar, text="🔤 A→Z排序", width=10, command=self._sort_alphabetically)
+        btn_sort = ttk.Button(toolbar, text="按名称排序", command=self._sort_alphabetically)
         btn_sort.pack(side=tk.RIGHT)
         ToolTip(btn_sort, "按首字母对所有条目进行升序排列（中文按拼音）")
         
-        # ===== 可滚动列表区域 =====
-        frame = ttk.Frame(self)
-        frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
-        
-        self.canvas = tk.Canvas(frame)
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = ttk.Frame(self.canvas)
-        # 让 scrollable_frame 的两列均分宽度
-        self.scrollable_frame.columnconfigure(0, weight=1)
-        self.scrollable_frame.columnconfigure(1, weight=1)
+        pane = ScrollablePane(self)
+        pane.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+        self.canvas, self.scrollable_frame = pane.canvas, pane.body
+        for column in range(self.NUM_COLUMNS):
+            self.scrollable_frame.columnconfigure(column, weight=1, uniform="entries")
 
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # 鼠标滚轮支持
-        self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        
-        self.canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
         # 加载初始条目（先去重再排序）
         unique_items = list(dict.fromkeys(item.strip() for item in initial_items if item.strip()))
         unique_items = self._sort_values(unique_items)
@@ -129,16 +154,17 @@ class DynamicListWindow(tk.Toplevel):
         bottom_frame = ttk.Frame(self)
         bottom_frame.pack(fill=tk.X, padx=15, pady=(5, 10))
         
-        btn_add = ttk.Button(bottom_frame, text="➕ 添加新的一行", command=lambda: self.add_row(""))
+        btn_add = ttk.Button(bottom_frame, text="添加条目", command=self._add_empty_row)
         btn_add.pack(side=tk.LEFT)
         
         btn_frame_right = ttk.Frame(bottom_frame)
         btn_frame_right.pack(side=tk.RIGHT)
-        ttk.Button(btn_frame_right, text="✅ 保存", command=self.save_and_close).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame_right, text="保存", style="Accent.TButton", command=self.save_and_close).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame_right, text="取消", command=self.destroy).pack(side=tk.LEFT, padx=5)
         
         self.saved_items = None
         self._update_match_count()
+        search_entry.focus_set()
         
     @staticmethod
     def _sort_key(text):
@@ -160,6 +186,14 @@ class DynamicListWindow(tk.Toplevel):
         except ImportError:
             return sorted(values, key=lambda x: x.lower().strip())
         
+    def _add_empty_row(self):
+        self.search_var.set("")
+        entry = self.add_row()
+        self._update_match_count()
+        self.canvas.update_idletasks()
+        self.canvas.yview_moveto(1.0)
+        entry.focus_set()
+
     def add_row(self, content=""):
         # 计算当前应在 grid 的哪一行哪一列
         total = len(self.rows)
@@ -187,23 +221,21 @@ class DynamicListWindow(tk.Toplevel):
         def _update_badge(*_):
             val = entry_var.get().strip()
             if val.endswith("*"):
-                badge_lbl.config(text="前缀", foreground="white", background="#0078D4")
+                badge_lbl.configure(text="前缀", style="Prefix.TLabel")
             else:
-                badge_lbl.config(text="精确", foreground="#666", background="")
+                badge_lbl.configure(text="精确" if val else "", style="Muted.TLabel")
         
         entry_var.trace_add("write", _update_badge)
         _update_badge()  # 初始化显示
         
-        # 滚动到底部
-        self.update_idletasks()
-        self.canvas.yview_moveto(1.0)
+        return entry
         
     def remove_row(self, frame, var):
         frame.grid_forget()
         frame.destroy()
         self.rows = [(f, v, b) for f, v, b in self.rows if v != var]
         self._reflow_grid()
-        self._update_match_count()
+        self._on_search_changed()
     
     def _reflow_grid(self):
         """删除行后重新排列 grid 布局"""
@@ -279,10 +311,11 @@ class DynamicListWindow(tk.Toplevel):
 class DualRuleWindow(tk.Toplevel):
     def __init__(self, parent, rules_dict=None):
         super().__init__(parent)
-        self.title("双元替换清洗引擎配置面板")
+        self.title("数据清洗与过滤规则")
         self.geometry("750x650")
         self.transient(parent)
         self.grab_set()
+        self.bind("<Escape>", lambda event: self.destroy())
         self._center_window(parent)
         
         self.result = None
@@ -290,27 +323,10 @@ class DualRuleWindow(tk.Toplevel):
         main_frame = ttk.Frame(self, padding="15")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        content_frame = ttk.Frame(main_frame)
-        content_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        pane = ScrollablePane(main_frame)
+        pane.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+        self.scrollable_frame = pane.body
 
-        canvas = tk.Canvas(content_frame, borderwidth=0, highlightthickness=0)
-        v_scrollbar = ttk.Scrollbar(content_frame, orient="vertical", command=canvas.yview)
-        
-        self.scrollable_frame = ttk.Frame(canvas)
-        self.scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window_id, width=e.width))
-        
-        # Add mousewheel support for the entire pop-up
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self.bind("<MouseWheel>", _on_mousewheel)
-        
-        window_id = canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=v_scrollbar.set)
-        
-        v_scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        
         self.line_rows = []
         self.content_rows = []
 
@@ -320,7 +336,7 @@ class DualRuleWindow(tk.Toplevel):
         # --- SECTION 1: Line Rules ---
         self._build_section(
             self.scrollable_frame, 
-            "🔴 排除行 (匹配后整行剔除放弃入库，除非填写替换项重组整行)", 
+            "排除行", "匹配的整行将被排除。填写替换项时，保留替换后的行。",
             self.line_rows, 
             rules_dict.get("line_rules", [])
         )
@@ -330,7 +346,7 @@ class DualRuleWindow(tk.Toplevel):
         # --- SECTION 2: Content Rules ---
         self._build_section(
             self.scrollable_frame, 
-            "🟡 排除内容 (仅消除或替换行内匹配到的局部内容，不伤害该行其他字词)", 
+            "排除内容", "仅删除或替换行内匹配的片段。",
             self.content_rows, 
             rules_dict.get("content_rules", [])
         )
@@ -339,18 +355,18 @@ class DualRuleWindow(tk.Toplevel):
         action_frame = ttk.Frame(main_frame)
         action_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
-        btn_save = ttk.Button(action_frame, text="✅ 保存配置", command=self.save_and_close)
+        btn_save = ttk.Button(action_frame, text="保存规则", style="Accent.TButton", command=self.save_and_close)
         btn_save.pack(side=tk.RIGHT)
         
-        btn_cancel = ttk.Button(action_frame, text="❌ 取消", command=self.destroy)
+        btn_cancel = ttk.Button(action_frame, text="取消", command=self.destroy)
         btn_cancel.pack(side=tk.RIGHT, padx=10)
 
-    def _build_section(self, parent_frame, title, row_list, initial_data):
+    def _build_section(self, parent_frame, title, description, row_list, initial_data):
         section_frame = ttk.Frame(parent_frame)
         section_frame.pack(fill=tk.X, pady=5)
         
-        header_lbl = ttk.Label(section_frame, text=title, font=("Microsoft YaHei UI", 11, "bold"), foreground="#D83B01" if "🔴" in title else "#B8860B")
-        header_lbl.pack(anchor="w", pady=(0, 10))
+        ttk.Label(section_frame, text=title, style="Section.TLabel").pack(anchor="w")
+        ttk.Label(section_frame, text=description, style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
         
         col_frame = ttk.Frame(section_frame)
         col_frame.pack(fill=tk.X)
@@ -399,6 +415,13 @@ class DualRuleWindow(tk.Toplevel):
         l_rules = [{"match": m.get().strip(), "replace": r.get()} for m, r in self.line_rows if m.get().strip()]
         c_rules = [{"match": m.get().strip(), "replace": r.get()} for m, r in self.content_rows if m.get().strip()]
                 
+        for label, rules in (("排除行", l_rules), ("排除内容", c_rules)):
+            for number, rule in enumerate(rules, 1):
+                try:
+                    compile_rule(rule)
+                except (re.error, IndexError, OverflowError) as error:
+                    messagebox.showerror("规则无效", f"{label}第 {number} 条：{error}", parent=self)
+                    return
         self.result = {"line_rules": l_rules, "content_rules": c_rules}
         self.destroy()
         
@@ -420,6 +443,7 @@ class AdvancedOptionsWindow(tk.Toplevel):
         self._center_window(parent)
         self.transient(parent)
         self.grab_set()
+        self.bind("<Escape>", lambda event: self.destroy())
         
         self.options = options
         self.scan_keys_var = tk.BooleanVar(value=options.get("logseq_scan_keys", False))
@@ -476,11 +500,12 @@ class AdvancedOptionsWindow(tk.Toplevel):
 class BlacklistWindow(tk.Toplevel):
     def __init__(self, parent, all_possible_basenames, blacklist_manager):
         super().__init__(parent)
-        self.title("🚫 词库排除选择 (黑名单)")
+        self.title("词库黑名单")
         self.geometry("450x450")
         self._center_window(parent)
         self.transient(parent)
         self.grab_set()
+        self.bind("<Escape>", lambda event: self.destroy())
         
         self.blacklist_manager = blacklist_manager
         current_blacklist = self.blacklist_manager()
@@ -492,23 +517,13 @@ class BlacklistWindow(tk.Toplevel):
             
         self.vars = {}
         
-        info_lbl = ttk.Label(self, text="打勾的词库将被永久剔除，以后扫描绝不生成并将在列表中隐藏：", foreground="gray", justify=tk.LEFT)
+        info_lbl = ttk.Label(self, text="勾选的词库将从预览隐藏，并删除对应的导出文件。", style="Muted.TLabel", justify=tk.LEFT, wraplength=400)
         info_lbl.pack(anchor="w", padx=15, pady=(15, 5))
         
-        frame = ttk.Frame(self)
-        frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
-        
-        canvas = tk.Canvas(frame)
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        self.scrollable_frame = ttk.Frame(canvas)
+        pane = ScrollablePane(self)
+        pane.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+        self.scrollable_frame = pane.body
 
-        self.scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
         if not all_known_basenames:
             ttk.Label(self.scrollable_frame, text="暂无发现任何生成过的词库...").pack(pady=20)
             
@@ -520,7 +535,7 @@ class BlacklistWindow(tk.Toplevel):
 
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="✅ 保存黑名单", command=self.save_and_close).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="保存黑名单", style="Accent.TButton", command=self.save_and_close).pack(side="left", padx=5)
         ttk.Button(button_frame, text="取消", command=self.destroy).pack(side="left", padx=5)
         
         self.saved = False

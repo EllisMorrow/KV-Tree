@@ -1,8 +1,9 @@
-import copy
 import os
 import tempfile
 import unittest
+from unittest import mock
 
+from src.core.app_state import AppState
 from src.logic.file_monitor import AppEventHandler
 
 
@@ -12,20 +13,6 @@ class _Dispatcher:
 
     def put_task(self, task):
         self.tasks.append(task)
-
-
-class _State:
-    def get_excluded_paths(self):
-        return []
-
-    def __init__(self, sources):
-        self.sources = sources
-
-    def get_source_files(self):
-        return copy.deepcopy(self.sources)
-
-    def update_source_file(self, path, data):
-        self.sources[path] = data
 
 
 class MonitorScopeTests(unittest.TestCase):
@@ -43,7 +30,7 @@ class MonitorScopeTests(unittest.TestCase):
 
     def _handler(self, sources):
         dispatcher = _Dispatcher()
-        return AppEventHandler(dispatcher, _State(sources)), dispatcher
+        return AppEventHandler(dispatcher, AppState({"source_files": sources, "excluded_paths": []})), dispatcher
 
     def test_unselected_sibling_file_is_not_queued(self):
         selected = self._write_markdown("selected.md")
@@ -73,6 +60,19 @@ class MonitorScopeTests(unittest.TestCase):
 
         self.assertEqual(len(dispatcher.tasks), 1)
         self.assertEqual(dispatcher.tasks[0][1], "modified")
+
+    def test_deleted_legacy_path_is_removed_without_reading_source_snapshot(self):
+        folder = os.path.join(self.root, "notes")
+        note = self._write_markdown(os.path.join("notes", "note.md"))
+        legacy = os.path.join(folder, ".", "note.md")
+        handler, dispatcher = self._handler({
+            folder: {"enabled": True, "type": "folder", "files": {legacy: 1}},
+        })
+        os.remove(note)
+        with mock.patch.object(handler.state, "get_source_files", side_effect=AssertionError):
+            handler.process_event("deleted", note)
+        self.assertEqual({}, handler.state.get_source_files()[folder]["files"])
+        self.assertEqual(1, len(dispatcher.tasks))
 
     def test_similar_prefix_and_disabled_sources_are_not_queued(self):
         enabled_folder = os.path.join(self.root, "notes")
