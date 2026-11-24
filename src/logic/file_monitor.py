@@ -1,4 +1,5 @@
 import os
+import stat
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -28,8 +29,11 @@ class AppEventHandler(FileSystemEventHandler):
         self.state = app_state
 
     def process_event(self, event_type, path):
+        if not path:
+            return
         path = _normalize_path(path)
-        if not path.lower().endswith(".md") or is_excluded(path, self.state.get_excluded_paths()):
+        markdown = path.lower().endswith(".md")
+        if (not markdown and event_type not in ("deleted", "directory")) or is_excluded(path, self.state.get_excluded_paths()):
             return
 
         folder_roots = []
@@ -44,7 +48,7 @@ class AppEventHandler(FileSystemEventHandler):
         if not folder_roots and not matched_file:
             return
 
-        if folder_roots:
+        if folder_roots and markdown and event_type != "directory":
             if event_type == "deleted":
                 self.state.update_folder_members(folder_roots, path, None)
             else:
@@ -61,19 +65,15 @@ class AppEventHandler(FileSystemEventHandler):
             self.process_event("modified", event.src_path)
 
     def on_created(self, event):
-        if not event.is_directory:
-            self.process_event("created", event.src_path)
+        self.process_event("directory" if event.is_directory else "created", event.src_path)
 
     def on_deleted(self, event):
-        if not event.is_directory:
-            self.process_event("deleted", event.src_path)
+        # Windows can report a removed directory as a file deletion.
+        self.process_event("deleted", event.src_path)
 
     def on_moved(self, event):
-        if not event.is_directory:
-            # Check each side independently: a file can move into or out of a
-            # watched source, and only the in-scope side should be queued.
-            self.process_event("deleted", event.src_path)
-            self.process_event("created", event.dest_path)
+        self.process_event("deleted", event.src_path)
+        self.process_event("directory" if event.is_directory else "created", event.dest_path)
 
 
 class FileMonitor:
@@ -84,30 +84,51 @@ class FileMonitor:
         self.state = app_state
         self.ui_cb = ui_callbacks
         self.observer = None
+        self._watch_signatures = None
+        self._targets = []
         self.event_handler = AppEventHandler(self.dispatcher, self.state)
+
+    def _watch_targets(self):
+        targets = []
+        for source, kind in self.state.get_enabled_source_roots():
+            path = _normalize_path(source)
+            recursive = kind == "folder"
+            targets.append((path if recursive else os.path.dirname(path), recursive))
+        return targets
+
+    @staticmethod
+    def _directory_signatures(targets):
+        signatures = {}
+        for path, _ in targets:
+            if path in signatures:
+                continue
+            try:
+                info = os.stat(path)
+            except (FileNotFoundError, NotADirectoryError):
+                signatures[path] = None
+            else:
+                signatures[path] = (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+        return signatures
+
+    def check_watches(self):
+        if self._watch_signatures is None:
+            return
+        signatures = self._directory_signatures(self._targets)
+        if signatures != self._watch_signatures:
+            self.start()
+            self.dispatcher.put_task(("initialize",))
 
     def start(self):
         """Start the smallest set of watches needed for enabled sources."""
         if self.observer and self.observer.is_alive():
             self.stop()
-
+        targets = self._watch_targets()
+        self._targets = targets
+        self._watch_signatures = {}
+        signatures = self._directory_signatures(targets)
         self.observer = Observer()
-        sources = self.state.get_source_files()
-        folder_roots = []
-        file_parents = []
-
-        for source_path, source_data in sources.items():
-            if not source_data.get("enabled"):
-                continue
-
-            normalized_source = _normalize_path(source_path)
-            if source_data.get("type") == "folder":
-                if os.path.isdir(normalized_source):
-                    folder_roots.append(normalized_source)
-            else:
-                parent = os.path.dirname(normalized_source)
-                if os.path.isdir(parent):
-                    file_parents.append(parent)
+        folder_roots = [path for path, recursive in targets if recursive and signatures[path] is not None]
+        file_parents = [path for path, recursive in targets if not recursive and signatures[path] is not None]
 
         # A recursive parent watch already covers all nested folder watches.
         recursive_roots = []
@@ -131,9 +152,11 @@ class FileMonitor:
             self.ui_cb['set_status'](f"监控已开启，正在监视 {watch_count} 个位置。")
         else:
             self.ui_cb['set_status']("监控开启，但无启用的源可供监视。")
+        self._watch_signatures = signatures
 
     def stop(self):
         """Stop monitoring."""
+        self._watch_signatures = None
         if self.observer and self.observer.is_alive():
             self.observer.stop()
             self.observer.join()

@@ -7,6 +7,7 @@ import unittest
 
 from src.core.app_state import AppState
 from src.logic.cache_manager import CacheManager
+from src.ui.components import DualRuleWindow
 from src.ui.main_window import KvTreeAppUI
 from src.ui.tray_icon import AppTrayIcon
 
@@ -84,6 +85,20 @@ class UiThreadDispatchTests(unittest.TestCase):
             ui._drain_ui_callbacks()
             self.assertEqual({"second.md": {str(notes)}}, ui._output_sources)
             self.assertEqual((), cache.get_output_contents(first))
+
+    def test_invalid_rule_is_reported_before_dialog_closes(self):
+        for pattern, replacement in (("[", ""), ("a", r"\2")):
+            with self.subTest(pattern=pattern, replacement=replacement):
+                ui = SimpleNamespace(
+                    line_rows=[(Mock(get=Mock(return_value=pattern)),
+                                Mock(get=Mock(return_value=replacement)))],
+                    content_rows=[], destroy=Mock(), result=None,
+                )
+                with patch("src.ui.components.messagebox.showerror") as error:
+                    DualRuleWindow.save_and_close(ui)
+                error.assert_called_once()
+                self.assertIsNone(ui.result)
+                ui.destroy.assert_not_called()
 
     def test_tray_callbacks_only_queue_ui_operations(self):
         ui = _TrayUi()

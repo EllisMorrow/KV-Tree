@@ -43,50 +43,64 @@ class ConfigManager:
 
     def load_config(self):
         try:
-            with open(self.config_file, "r", encoding="utf-8") as f:
-                loaded_config = json.load(f)
-            
-            # 加载和升级旧配置
-            loaded_sources = loaded_config.get("source_files", {})
-            for path, data in loaded_sources.items():
-                if "type" not in data: 
-                    data["type"] = "file"
-                if data["type"] == "folder" and "files" not in data:
-                    data["files"] = {}
-            self.config["source_files"] = loaded_sources
-            self.config['excluded_paths'] = loaded_config.get('excluded_paths', list(DEFAULT_EXCLUDED_PATHS))
-            
-            self.config["output_path"] = loaded_config.get("output_path", os.getcwd())
-            
-            rules_val = loaded_config.get("rules", DEFAULT_RULES)
-            if isinstance(rules_val, str) and not rules_val.strip():
-                rules_val = DEFAULT_RULES
-            elif isinstance(rules_val, list) and not rules_val:
-                # If they saved an empty list from the previous phase, reset it so they see defaults
-                rules_val = DEFAULT_RULES
-            self.config["rules"] = rules_val
+            with open(self.config_file, encoding="utf-8") as file:
+                loaded = json.load(file)
+        except (FileNotFoundError, ValueError):
+            return self.config
+        if not isinstance(loaded, dict):
+            return self.config
 
-            # 加载高级选项，如果不存在则使用默认值
-            # 加载高级选项，并确保新键存在
-            loaded_advanced = loaded_config.get("advanced_options", {})
-            default_advanced = self.config["advanced_options"]
-            self.config["advanced_options"] = {**default_advanced, **loaded_advanced}
-            
-            # 加载输出选择，如果不存在则使用默认值
-            self.config["output_selection"] = loaded_config.get("output_selection", {})
+        sources = loaded.get("source_files")
+        if isinstance(sources, dict):
+            for path, data in sources.items():
+                if not path or "\x00" in path or not isinstance(data, dict):
+                    continue
+                kind = data.get("type", "file")
+                if kind not in ("file", "folder"):
+                    continue
+                source = {**data, "type": kind}
+                if kind == "folder":
+                    files = data.get("files")
+                    source["files"] = {
+                        name: mtime for name, mtime in files.items() if name and "\x00" not in name
+                    } if isinstance(files, dict) else {}
+                self.config["source_files"][path] = source
 
-            # 兼容旧配置：这些字段首次引入前保存的文件没有它们。
-            self.config["blacklist"] = loaded_config.get("blacklist", [])
-            self.config["logseq_exclude_keys"] = loaded_config.get("logseq_exclude_keys", [])
-            self.config["_logseq_seen_defaults"] = loaded_config.get("_logseq_seen_defaults", [])
-            
-            # 加载窗口大小与位置
-            self.config["window_geometry"] = loaded_config.get("window_geometry", "")
+        for key in ("output_path", "window_geometry"):
+            value = loaded.get(key)
+            if isinstance(value, str) and "\x00" not in value:
+                self.config[key] = value
+        for key in ("excluded_paths", "blacklist", "logseq_exclude_keys", "_logseq_seen_defaults"):
+            value = loaded.get(key)
+            if isinstance(value, list):
+                self.config[key] = [entry for entry in value if isinstance(entry, str) and "\x00" not in entry]
 
-        except (FileNotFoundError, json.JSONDecodeError):
-            # 如果文件不存在或无效，则使用默认配置
-            pass
+        options = loaded.get("advanced_options")
+        if isinstance(options, dict):
+            self.config["advanced_options"].update(options)
+        selection = loaded.get("output_selection")
+        if isinstance(selection, dict):
+            self.config["output_selection"] = {
+                name: selected for name, selected in selection.items() if isinstance(selected, bool)
+            }
+
+        rules = loaded.get("rules")
+        if isinstance(rules, str) and rules.strip():
+            self.config["rules"] = rules
+        elif isinstance(rules, list) and rules:
+            self.config["rules"] = self._valid_rules(rules)
+        elif isinstance(rules, dict):
+            self.config["rules"] = {key: self._valid_rules(rules.get(key))
+                                    for key in ("line_rules", "content_rules")}
         return self.config
+
+    @staticmethod
+    def _valid_rules(rows):
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)
+                and isinstance(row.get("match"), str)
+                and isinstance(row.get("replace", ""), str)]
 
     def save_config(self, app_data):
         """ 使用从主应用传入的最新数据来保存配置 """

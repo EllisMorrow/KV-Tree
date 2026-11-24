@@ -14,6 +14,15 @@ def _safe_library_filename(library_name: str):
         return None
     return f"#KV树-{library_name}.md"
 
+def compile_rule(rule):
+    pattern = re.compile(rule.get("match", ""))
+    replacement = rule.get("replace", "")
+    if replacement:
+        # Compile the replacement template even if no input line matches.
+        pattern.sub(replacement, "")
+    return {"match": pattern, "replace": replacement}
+
+
 class Node:
     """
     表示 AST 中的一个节点，对应于源文本中的一行。
@@ -84,7 +93,7 @@ class AstParser:
         从文本行构建一个 AST。
         """
         root = Node("root", -1)
-        last_node_at_indent = {-1: root}
+        ancestors = [root]
         fence = None
 
         for line in lines:
@@ -93,15 +102,10 @@ class AstParser:
 
             indent = self.get_indent(line)
             
-            # 找到正确的父节点
-            parent_indent = -1
-            for i in sorted(last_node_at_indent.keys(), reverse=True):
-                if indent > i:
-                    parent_indent = i
-                    break
-            
-            parent_node = last_node_at_indent[parent_indent]
-            
+            while ancestors[-1].indent >= indent:
+                ancestors.pop()
+            parent_node = ancestors[-1]
+
             marker = re.match(r'^\s*(?:-\s+)?(?P<run>`{3,}|~{3,})(?P<tail>.*)$', line)
             code = fence is not None
             if fence is not None:
@@ -115,7 +119,7 @@ class AstParser:
             new_node = Node(line, indent, parent=parent_node, code=code)
             parent_node.add_child(new_node)
             
-            last_node_at_indent[indent] = new_node
+            ancestors.append(new_node)
 
         return root
 
@@ -150,23 +154,8 @@ class AstParser:
         line_rules = rules.get("line_rules", [])
         content_rules = rules.get("content_rules", [])
 
-        compiled_line = []
-        for r in line_rules:
-            try:
-                compiled_line.append({
-                    "match": re.compile(r.get("match", "")),
-                    "replace": r.get("replace", "")
-                })
-            except Exception: pass
-            
-        compiled_content = []
-        for r in content_rules:
-            try:
-                compiled_content.append({
-                    "match": re.compile(r.get("match", "")),
-                    "replace": r.get("replace", "")
-                })
-            except Exception: pass
+        compiled_line = [compile_rule(rule) for rule in line_rules]
+        compiled_content = [compile_rule(rule) for rule in content_rules]
 
         processed_lines = []
         for line in lines:
@@ -214,18 +203,8 @@ class AstParser:
             processed_nodes.add(node) # Mark parent as processed
 
             if mode == '父与子':
-                kv_trees[lib].append(node.line_without_tag)
-                self._render_block_children(node, lib, -1, kv_trees, processed_nodes)
-            
-            elif mode == '不包含父':
-                base_indent = -1
-                if node.children:
-                    for child in node.children:
-                        if child.raw_line.strip():
-                            base_indent = child.indent
-                            break
-                    if base_indent != -1:
-                        self._render_block_children(node, lib, base_indent, kv_trees, processed_nodes)
+                self._append_word_entry(kv_trees[lib], node)
+            self._render_block_children(node, lib, kv_trees, processed_nodes)
 
         # Phase 2: Process all remaining single-line tags
         for node in all_nodes:
@@ -235,34 +214,30 @@ class AstParser:
                 continue
             
             lib = node.tag['lib']
-            # For single lines, we always want un-indented content.
-            content = node.content
-            kv_trees[lib].append(f"- {content}")
+            self._append_word_entry(kv_trees[lib], node)
             processed_nodes.add(node)
 
         return kv_trees
 
-    def _render_block_children(self, parent_node: Node, lib: str, base_indent: int, kv_trees: defaultdict, processed_nodes: set):
-        """ Renders all children of a block-defining node. """
+    @staticmethod
+    def _append_word_entry(entries, node):
+        # QuickKV starts a new word entry only on a top-level "- " line.
+        line = node.line_without_tag.strip()
+        if line == "-":
+            return
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if line:
+            entries.append(f"- {line}")
+
+    def _render_block_children(self, parent_node: Node, lib: str, kv_trees: defaultdict, processed_nodes: set):
+        """Export each eligible descendant as a separate word entry."""
         for node in parent_node.children:
-            if node in processed_nodes:
-                continue
-            
-            # If a child defines its own block, stop rendering this branch.
-            if node.tag and node.tag.get('mode'):
+            if node in processed_nodes or (node.tag and node.tag.get('mode')):
                 continue
 
             processed_nodes.add(node)
-            
-            line = node.line_without_tag
+            self._append_word_entry(kv_trees[lib], node)
 
-            if base_indent != -1: # '不包含父' mode
-                output_line = ' ' * (node.indent - base_indent) + line.lstrip()
-            else: # '父与子' mode
-                output_line = line
-            
-            kv_trees[lib].append(output_line)
-
-            # Recurse only if the node is NOT a tag itself.
             if not node.tag:
-                self._render_block_children(node, lib, base_indent, kv_trees, processed_nodes)
+                self._render_block_children(node, lib, kv_trees, processed_nodes)

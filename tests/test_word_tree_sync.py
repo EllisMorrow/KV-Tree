@@ -9,14 +9,14 @@ from src.core.app_state import AppState
 from src.core.task_dispatcher import TaskDispatcher
 from src.logic.ast_parser import AstParser
 from src.logic.cache_manager import CacheManager
-from src.logic.file_monitor import FileMonitor
-from src.logic.path_filter import normalize
+from src.logic.file_monitor import AppEventHandler, FileMonitor
+from src.logic.path_filter import normalize, scan_markdown
 
 
 class WordTreeSyncTests(unittest.TestCase):
     def test_batch_wait_is_bounded_even_with_long_debounce(self):
         processed = Event()
-        dispatcher = TaskDispatcher(AppState(), Mock(), {"set_status": Mock()})
+        dispatcher = TaskDispatcher(AppState(), Mock(get_pending_exports=Mock(return_value=set())), {"set_status": Mock()})
         dispatcher.debounce_seconds = 60
         dispatcher.max_batch_wait = 0.1
 
@@ -42,7 +42,7 @@ class WordTreeSyncTests(unittest.TestCase):
                 raise OSError("simulated batch failure")
             processed.set()
 
-        dispatcher = TaskDispatcher(AppState(), Mock(), {"set_status": Mock()})
+        dispatcher = TaskDispatcher(AppState(), Mock(get_pending_exports=Mock(return_value=set())), {"set_status": Mock()})
         dispatcher.debounce_seconds = 0
         dispatcher._process_dirty_batch = process_batch
         dispatcher.start()
@@ -55,7 +55,7 @@ class WordTreeSyncTests(unittest.TestCase):
             dispatcher.stop()
 
     def test_pending_file_events_share_one_queue_entry_per_path(self):
-        dispatcher = TaskDispatcher(AppState(), Mock(), {})
+        dispatcher = TaskDispatcher(AppState(), Mock(get_pending_exports=Mock(return_value=set())), {})
         for event in ("created", "modified", "deleted"):
             dispatcher.put_task(("process_file", event, "first.md"))
         dispatcher.put_task(("process_file", "created", "second.md"))
@@ -87,6 +87,231 @@ class WordTreeSyncTests(unittest.TestCase):
             self.assertIn("更新完成", callbacks["set_status"].call_args.args[0])
             self.assertEqual("- 新词条", output.read_text(encoding="utf-8"))
             self.assertEqual(set(), dispatcher._failed_exports)
+
+    def test_failed_export_write_and_delete_retry_after_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "note.md"
+            source.write_text("- 旧词条 #KV树-测试", encoding="utf-8")
+            output = root / "exports" / "#KV树-测试.md"
+            state = AppState({
+                "source_files": {str(source): {"enabled": True, "type": "file"}},
+                "output_path": str(output.parent),
+                "output_selection": {output.name: True},
+            })
+            callbacks = {key: Mock() for key in ("set_status", "update_lists", "update_progress")}
+
+            def new_dispatcher():
+                return TaskDispatcher(state, CacheManager(root / "cache.json"), callbacks)
+
+            dispatcher = new_dispatcher()
+            dispatcher._execute_initialize()
+            source.write_text("- 新词条 #KV树-测试", encoding="utf-8")
+            dispatcher.dirty_files.add(("modified", normalize(source)))
+            with patch("src.core.task_dispatcher.atomic_write", side_effect=PermissionError("locked")):
+                dispatcher._process_dirty_batch()
+            self.assertEqual("- 旧词条", output.read_text(encoding="utf-8"))
+
+            dispatcher = new_dispatcher()
+            self.assertEqual({str(output)}, dispatcher.cache_manager.get_pending_exports())
+            dispatcher._execute_initialize()
+            self.assertEqual("- 新词条", output.read_text(encoding="utf-8"))
+            self.assertEqual(set(), new_dispatcher().cache_manager.get_pending_exports())
+
+            source.unlink()
+            dispatcher.dirty_files.add(("deleted", normalize(source)))
+            with patch.object(dispatcher, "_remove_output_file", side_effect=PermissionError("locked")):
+                dispatcher._process_dirty_batch()
+            self.assertTrue(output.exists())
+
+            dispatcher = new_dispatcher()
+            self.assertIsNone(dispatcher.cache_manager.get_entry(source))
+            self.assertEqual({str(output)}, dispatcher.cache_manager.get_pending_exports())
+            dispatcher._execute_initialize()
+            self.assertFalse(output.exists())
+            self.assertEqual(set(), new_dispatcher().cache_manager.get_pending_exports())
+
+    def test_full_scan_keeps_concurrent_file_events(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            removed, added = root / "removed.md", root / "added.md"
+            removed.write_text("- removed #KV树-测试", encoding="utf-8")
+            stale = {str(removed): removed.stat().st_mtime}
+            state = AppState({"source_files": {
+                str(root): {"enabled": True, "type": "folder", "files": stale}
+            }})
+            cache = CacheManager(root / "cache.json")
+            callbacks = {key: Mock() for key in ("set_status", "update_lists", "update_progress")}
+            dispatcher = TaskDispatcher(state, cache, callbacks)
+            watcher = AppEventHandler(dispatcher, state)
+
+            def scan_with_concurrent_changes(*args):
+                removed.unlink()
+                watcher.process_event("deleted", str(removed))
+                added.write_text("- added #KV树-测试", encoding="utf-8")
+                watcher.process_event("created", str(added))
+                return stale, []
+
+            with patch("src.core.task_dispatcher.scan_markdown", side_effect=scan_with_concurrent_changes):
+                dispatcher._execute_initialize()
+            self.assertIsNone(cache.get_entry(removed))
+            self.assertIsNotNone(cache.get_entry(added))
+            self.assertEqual({str(root)}, state.get_source_owners(
+                {normalize(added)}, [(str(root), normalize(root), "folder")]
+            ))
+
+    def test_nested_directory_events_scan_only_the_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            parent, sibling = root / "parent", root / "parent-sibling"
+            child = parent / "child"
+            child.mkdir(parents=True)
+            sibling.mkdir()
+            note = child / "note.md"
+            note.touch()
+            state = AppState({"source_files": {str(root): {"enabled": True, "type": "folder"}}})
+            dispatcher = TaskDispatcher(state, CacheManager(root / "cache.json"), {})
+            events = {("directory", normalize(path)) for path in (parent, child, sibling)}
+            with patch("src.core.task_dispatcher.scan_markdown", wraps=scan_markdown) as scan:
+                self.assertEqual({normalize(note)}, dispatcher._collect_changed_paths(events))
+            self.assertEqual({normalize(parent), normalize(sibling)},
+                             {call.args[0] for call in scan.call_args_list})
+            self.assertEqual(2, scan.call_count)
+
+    def test_unchanged_words_keep_export_and_list_while_refreshing_cache_mtime(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "note.md"
+            source.write_text("- 内容 #KV树-测试", encoding="utf-8")
+            output = root / "#KV树-测试.md"
+            output.write_text("- 内容", encoding="utf-8")
+            state = AppState({
+                "source_files": {str(source): {"enabled": True, "type": "file"}},
+                "output_path": folder,
+                "output_selection": {output.name: True},
+            })
+            cache = CacheManager(root / "cache.json")
+            cache.update_entry(source, 1, {str(output): "- 内容"})
+            callbacks = {key: Mock() for key in ("set_status", "update_lists")}
+            dispatcher = TaskDispatcher(state, cache, callbacks)
+            dispatcher.dirty_files.add(("modified", normalize(source)))
+            with patch("src.core.task_dispatcher.atomic_write") as write:
+                dispatcher._process_dirty_batch()
+            write.assert_not_called()
+            callbacks["update_lists"].assert_not_called()
+            persisted = CacheManager(root / "cache.json").get_entry(source)
+            self.assertEqual(source.stat().st_mtime, persisted["mtime"])
+            self.assertEqual("- 内容", output.read_text(encoding="utf-8"))
+
+    def test_indent_increase_after_sibling_stays_in_current_branch(self):
+        outputs, _ = AstParser().parse(
+            "- A #KV树-A-父与子\n  - child A\n- B #KV树-B-父与子\n    - child B"
+        )
+        self.assertEqual(["- A", "- child A"], outputs["#KV树-A.md"])
+        self.assertEqual(["- B", "- child B"], outputs["#KV树-B.md"])
+
+    def test_export_normalizes_entries_before_deduplicating_across_sources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first, second = root / "first.md", root / "second.md"
+            first.write_text(
+                "- parent #KV树-test-父与子\n  - child\n    - grandchild\n"
+                "- omitted #KV树-test-不包含父\n  - second parent\n    - child",
+                encoding="utf-8",
+            )
+            second.write_text("- child #KV树-test", encoding="utf-8")
+            output = root / "exports" / "#KV树-test.md"
+            state = AppState({
+                "source_files": {str(path): {"enabled": True, "type": "file"}
+                                 for path in (first, second)},
+                "output_path": str(output.parent),
+                "output_selection": {output.name: True},
+            })
+            callbacks = {key: Mock() for key in ("set_status", "update_lists", "update_progress")}
+            dispatcher = TaskDispatcher(state, CacheManager(root / "cache.json"), callbacks)
+            dispatcher._execute_initialize()
+
+            self.assertEqual(["- child", "- grandchild", "- parent", "- second parent"],
+                             output.read_text(encoding="utf-8").splitlines())
+            output.chmod(0o666)
+
+    def test_new_rules_invalidate_unchanged_source_cache_on_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            note = root / "note.md"
+            note.write_text("- demo #KV树-test", encoding="utf-8")
+            config = {"source_files": {str(note): {"enabled": True, "type": "file"}}}
+            callbacks = {key: Mock() for key in ("set_status", "update_lists", "update_progress")}
+            cache_path = root / "cache.json"
+            cache = CacheManager(cache_path)
+            TaskDispatcher(AppState(config), cache, callbacks)._execute_initialize()
+            self.assertTrue(cache.get_outputs_for_file(note))
+
+            rules = {"line_rules": [{"match": "demo", "replace": ""}]}
+            config["rules"] = rules
+            cache = CacheManager(cache_path)
+            dispatcher = TaskDispatcher(AppState(config), cache, callbacks)
+            dispatcher._execute_initialize()
+            self.assertEqual({}, cache.get_outputs_for_file(note))
+            with patch.object(dispatcher, "_parse_single_file_stateless") as parse:
+                dispatcher._execute_initialize()
+            parse.assert_not_called()
+
+    def test_blacklist_changes_reconcile_export_without_reparsing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            note = root / "note.md"
+            note.write_text("- demo #KV树-test", encoding="utf-8")
+            output = root / "out" / "#KV树-test.md"
+            state = AppState({
+                "source_files": {str(note): {"enabled": True, "type": "file"}},
+                "output_path": str(output.parent),
+                "output_selection": {output.name: True},
+            })
+            callbacks = {key: Mock() for key in ("set_status", "update_lists", "update_progress")}
+            dispatcher = TaskDispatcher(state, CacheManager(root / "cache.json"), callbacks)
+            dispatcher._execute_initialize()
+            self.assertTrue(output.exists())
+            with patch.object(dispatcher, "_parse_single_file_stateless") as parse:
+                state.add_to_blacklist(output.name)
+                dispatcher._execute_initialize()
+                self.assertFalse(output.exists())
+                state.remove_from_blacklist(output.name)
+                dispatcher._execute_initialize(reconcile_names={output.name})
+                self.assertEqual("- demo", output.read_text(encoding="utf-8"))
+            parse.assert_not_called()
+
+    def test_recreated_monitor_root_is_reopened_and_rescanned(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            notes = root / "notes"
+            notes.mkdir()
+            state = AppState({"source_files": {str(notes): {"enabled": True, "type": "folder"}}})
+            callbacks = {key: Mock() for key in ("set_status", "update_lists", "update_progress")}
+            cache = CacheManager(root / "cache.json")
+            dispatcher = TaskDispatcher(state, cache, callbacks)
+            monitor = FileMonitor(dispatcher, state, callbacks)
+            dispatcher.start()
+            try:
+                monitor.start()
+                notes.rename(root / "moved")
+                monitor.check_watches()
+                notes.mkdir()
+                existing = notes / "before-reconnect.md"
+                existing.write_text("- existing #KV树-test", encoding="utf-8")
+                monitor.check_watches()
+                dispatcher.task_queue.join()
+                self.assertIsNotNone(cache.get_entry(existing))
+
+                new = notes / "after-reconnect.md"
+                new.write_text("- new #KV树-test", encoding="utf-8")
+                deadline = time.monotonic() + 8
+                while cache.get_entry(new) is None:
+                    self.assertLess(time.monotonic(), deadline, "监控未重新接收文件事件")
+                    time.sleep(0.05)
+            finally:
+                monitor.stop()
+                dispatcher.stop()
 
     def test_clear_cache_rebuild_removes_obsolete_export(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -198,6 +423,22 @@ class WordTreeSyncTests(unittest.TestCase):
                 self.assertEqual({"- 乙", "- 丙"}, lines())
                 (sources / "renamed.md").unlink()
                 wait_for(lambda: lines() == {"- 乙"})
+                incoming = root / "incoming"
+                incoming.mkdir()
+                (incoming / "group.md").write_text("- 丁 #KV树-测试", encoding="utf-8")
+                group = sources / "group"
+                incoming.rename(group)
+                wait_for(lambda: lines() == {"- 乙", "- 丁"})
+                renamed_group = sources / "renamed.md"
+                group.rename(renamed_group)
+                wait_for(lambda: cache.get_entry(group / "group.md") is None
+                         and cache.get_entry(renamed_group / "group.md") is not None)
+                self.assertEqual({"- 乙", "- 丁"}, lines())
+                renamed_group.rename(root / "moved-out")
+                wait_for(lambda: lines() == {"- 乙"})
+                self.assertIsNone(cache.get_entry(renamed_group / "group.md"))
+                self.assertNotIn(normalize(renamed_group / "group.md"),
+                                 state.get_source_files()[str(sources)]["files"])
                 first.write_text("- 见 `#KV树-测试.md`", encoding="utf-8")
                 wait_for(lambda: not output.exists() and not state.get_active_outputs())
             finally:

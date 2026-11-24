@@ -36,6 +36,7 @@ class AppState:
             path: self._canonical_source(data)
             for path, data in config.get("source_files", {}).items()
         }
+        self._folder_scans = {}
         self._output_path = config.get("output_path", "")
         self._rules = config.get("rules", "")
         self._advanced_options = config.get("advanced_options", {})
@@ -89,6 +90,38 @@ class AppState:
                     owners.add(path)
             return owners
 
+    def begin_folder_scan(self, root):
+        with self._lock:
+            source = self._source_files.get(root)
+            if not source or not source.get("enabled") or source.get("type") != "folder":
+                return None
+            # Record watcher updates until the scan snapshot can be merged.
+            changes = {}
+            self._folder_scans[root] = changes
+            return changes
+
+    def finish_folder_scan(self, root, changes, discovered, *, partial=False):
+        canonical = None if discovered is None else {
+            normalize(path): mtime for path, mtime in discovered.items()
+        }
+        with self._lock:
+            if self._folder_scans.get(root) is not changes:
+                current = self._source_files.get(root, {})
+                return tuple(current.get("files", ())) if current.get("enabled") else ()
+            del self._folder_scans[root]
+            if canonical is None:
+                return ()
+            source = self._source_files[root]
+            if partial:
+                canonical = {**source["files"], **canonical}
+            for path, mtime in changes.items():
+                if mtime is None:
+                    canonical.pop(path, None)
+                else:
+                    canonical[path] = mtime
+            source["files"] = canonical
+            return tuple(canonical)
+
     def update_folder_members(self, roots, path, mtime):
         with self._lock:
             for root in roots:
@@ -96,6 +129,9 @@ class AppState:
                 if not source or not source.get("enabled") or source.get("type") != "folder":
                     continue
                 files = source["files"]
+                changes = self._folder_scans.get(root)
+                if changes is not None:
+                    changes[path] = mtime
                 if mtime is None:
                     files.pop(path, None)
                 else:
@@ -117,12 +153,13 @@ class AppState:
     def update_source_file(self, path, data):
         canonical = self._canonical_source(data)
         with self._lock:
+            self._folder_scans.pop(path, None)
             self._source_files[path] = canonical
             
     def remove_source_file(self, path):
         with self._lock:
-            if path in self._source_files:
-                del self._source_files[path]
+            self._folder_scans.pop(path, None)
+            self._source_files.pop(path, None)
                 
     def get_output_path(self):
         with self._lock:

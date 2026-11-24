@@ -1,9 +1,12 @@
+import hashlib
+import json
 import queue
 import threading
 import os
 import stat
 import time
 import concurrent.futures
+from pathlib import Path
 from src.logic.ast_parser import AstParser
 from src.logic.cache_manager import PARSER_REVISION
 from src.logic.path_filter import is_excluded, normalize, scan_markdown
@@ -23,8 +26,9 @@ class TaskDispatcher:
         self.task_queue = queue.Queue()
         self.worker_thread = None
         self.dirty_files = set()
-        self._failed_exports = set()
-        self._pending_event_paths = set()
+        self._failed_exports = cache_manager.get_pending_exports()
+        self._export_state_needs_save = False
+        self._pending_events = {}
         self._pending_event_lock = threading.Lock()
         self.last_dirty_time = 0
         self.first_dirty_time = 0
@@ -46,9 +50,13 @@ class TaskDispatcher:
         if task[0] == "process_file":
             path = task[2]
             with self._pending_event_lock:
-                if path in self._pending_event_paths:
+                event = task[1]
+                if path in self._pending_events:
+                    # A deletion may represent an entire directory on Windows.
+                    if event in ("deleted", "directory"):
+                        self._pending_events[path] = event
                     return
-                self._pending_event_paths.add(path)
+                self._pending_events[path] = event
                 self.task_queue.put(task)
         else:
             self.task_queue.put(task)
@@ -76,19 +84,21 @@ class TaskDispatcher:
                 if task_name == "exit": 
                     break
                 elif task_name == "initialize": 
-                    self._execute_initialize()
+                    self._execute_initialize(reconcile_names=task[1] if len(task) > 1 else ())
                 elif task_name == "scan_folder": 
                     self._execute_scan_folder(task[1])
                 elif task_name == "process_file":
                     with self._pending_event_lock:
-                        self._pending_event_paths.discard(task[2])
+                        event = self._pending_events.pop(task[2])
                     self.last_dirty_time = time.monotonic()
                     if not self.dirty_files:
                         self.first_dirty_time = self.last_dirty_time
                     # Add to dirty set instead of immediate processing
-                    self.dirty_files.add((task[1], task[2])) # (event_type, path)
+                    self.dirty_files.add((event, task[2])) # (event_type, path)
                 elif task_name == "regenerate_output": 
                     self._execute_regenerate_output(task[1])
+                elif task_name == "delete_exports":
+                    self.ui_cb['exports_deleted'](*self.delete_active_exports(task[1]))
                 elif task_name == "full_rescan": 
                     self._execute_full_rescan()
                 elif task_name == "clear_cache": 
@@ -99,17 +109,47 @@ class TaskDispatcher:
             finally:
                 self.task_queue.task_done()
                 
+    def _collect_changed_paths(self, events):
+        paths = {path for event, path in events
+                 if event != "directory" and path.lower().endswith(".md")}
+        roots = [(path, normalize(path)) for path, kind in self.state.get_enabled_source_roots()
+                 if kind == "folder"]
+        exclusions = self.state.get_excluded_paths()
+        candidates = {path for event, path in events if event in ("deleted", "directory")}
+        directories = {path for path in candidates if os.path.isdir(path)}
+        paths.difference_update(directories)
+        # Recursive traversal of a parent covers every nested directory event.
+        for changed in candidates:
+            if any(str(parent) in directories for parent in Path(changed).parents):
+                continue
+            if changed in directories:
+                if not any(_is_within_folder(changed, root) for _, root in roots):
+                    continue
+                discovered, errors = scan_markdown(changed, exclusions)
+                for error in errors:
+                    print(f"Directory scan error: {error}")
+                for path, mtime in discovered.items():
+                    path = normalize(path)
+                    owners = [source for source, root in roots if _is_within_folder(path, root)]
+                    self.state.update_folder_members(owners, path, mtime)
+                    paths.add(path)
+            for path in self.cache_manager.get_paths_below(changed):
+                if not os.path.exists(path):
+                    owners = [source for source, root in roots if _is_within_folder(path, root)]
+                    self.state.update_folder_members(owners, path, None)
+                    paths.add(path)
+        return paths
+
     def _process_dirty_batch(self):
-        unique_paths = {path for _, path in self.dirty_files}
+        events = self.dirty_files.copy()
         self.dirty_files.clear()
+        unique_paths = self._collect_changed_paths(events)
         
         self.ui_cb['set_status'](f"后台批量处理 {len(unique_paths)} 个文件...")
         dirty_outputs = set()
-        
-        rules = self.state.get_rules()
-        adv_opts = self.state.get_advanced_options()
-        output_path_base = self.state.get_output_path()
-        logseq_exclude_keys = self.state.get_logseq_exclude_keys()
+        changed_sources = set()
+
+        rules, adv_opts, output_path_base, logseq_exclude_keys, settings_key = self._parse_settings()
         
         enabled_scope = self._get_enabled_event_paths(unique_paths)
         failed = 0
@@ -121,49 +161,60 @@ class TaskDispatcher:
             old, new = self._update_cache_for_file(path, deleted=is_deleted,
                                                     rules=rules, adv_opts=adv_opts,
                                                     output_path_base=output_path_base,
-                                                    logseq_exclude_keys=logseq_exclude_keys)
+                                                    logseq_exclude_keys=logseq_exclude_keys,
+                                                    settings_key=settings_key)
             if new is None:
                 failed += 1
                 continue
             dirty_outputs.update(old.keys())
             dirty_outputs.update(new.keys())
+            changed_sources.update(old.keys() ^ new.keys())
             
         dirty_outputs.update(self._failed_exports)
         export_errors = [error for path in dirty_outputs
                          if (error := self._update_single_output_file(path))]
-        self.cache_manager.save_cache()
-        self.ui_cb['update_lists'](dirty_outputs)
+        cache_error = self._save_cache() if unique_paths or self._export_state_needs_save else ""
+        if changed_sources:
+            self.ui_cb['update_lists'](changed_sources)
+        messages = []
         if export_errors:
-            source_error = f"另有 {failed} 个源文件读取失败，已保留上次结果。" if failed else ""
-            self.ui_cb['set_status'](f"批量更新有 {len(export_errors)} 项导出失败。{export_errors[0]}{source_error}")
-        elif failed:
-            self.ui_cb['set_status'](f"批量更新完成，{failed} 个源文件读取失败，已保留上次结果。")
-        else:
-            self.ui_cb['set_status']("批量更新完成。")
-        
-    def _execute_initialize(self, force=False):
+            messages.append(f"{len(export_errors)} 项导出失败。{export_errors[0]}")
+        if failed:
+            messages.append(f"{failed} 个源文件读取失败，已保留可用的旧结果。")
+        if cache_error:
+            messages.append(cache_error)
+        self.ui_cb['set_status']("批量更新：" + "".join(messages) if messages else "批量更新完成。")
+
+    def _save_cache(self):
+        if self.cache_manager.save_cache(self._failed_exports):
+            self._export_state_needs_save = False
+            return ""
+        self._export_state_needs_save = True
+        return "解析缓存及待重试导出记录未能保存。"
+
+    def _parse_settings(self):
+        rules = self.state.get_rules()
+        options = self.state.get_advanced_options()
+        output = self.state.get_output_path()
+        excluded_keys = self.state.get_logseq_exclude_keys()
+        parsing_options = {name: bool(options.get(name)) for name in (
+            "logseq_scan_keys", "logseq_scan_values", "logseq_scan_pure_values"
+        )}
+        payload = json.dumps(
+            [rules, parsing_options, output, sorted(set(excluded_keys))],
+            sort_keys=True, ensure_ascii=True,
+        )
+        return rules, options, output, excluded_keys, hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+    def _execute_initialize(self, force=False, reconcile_names=()):
         self.ui_cb['set_status']("极速启动：正在多线程校验缓存和解析文件...")
         self.ui_cb['update_progress'](mode='determinate', val=0)
-        
-        # 检查输出路径是否与缓存中的路径一致，如果不一致则强制重建
-        current_output = self.state.get_output_path()
-        cached_paths_list = self.cache_manager.get_all_cached_paths()
-        if cached_paths_list:
-            # 检查第一个缓存条目的输出路径是否包含当前 output_path
-            sample_outputs = self.cache_manager.get_outputs_for_file(cached_paths_list[0])
-            if sample_outputs:
-                sample_key = next(iter(sample_outputs))
-                # 如果当前输出路径为空或者缓存中的路径前缀不匹配，强制清除所有缓存的 mtime 以触发重建
-                if (not current_output or current_output == os.getcwd()) or \
-                   (current_output and not sample_key.startswith(current_output)):
-                    for cp in cached_paths_list:
-                        entry = self.cache_manager.get_entry(cp)
-                        if entry:
-                            entry['mtime'] = 0  # 强制使 mtime 失效，触发重新解析
-                            self.cache_manager.update_entry(cp, 0, entry.get('outputs', {}))
-        
-        all_source_files = set(self._get_all_source_files())
+        rules, adv_opts, output_path_base, logseq_exclude_keys, settings_key = self._parse_settings()
+
+        all_source_files, scan_errors = self._get_all_source_files()
         dirty_outputs = set()
+        failed_sources = set()
+        missing_sources = set()
         cached_paths = self.cache_manager.get_all_cached_paths()
         total_files = len(all_source_files)
         
@@ -177,13 +228,18 @@ class TaskDispatcher:
             
             try:
                 current_mtime = os.path.getmtime(file_path)
+            except FileNotFoundError:
+                missing_sources.add(file_path)
+                continue
             except OSError as error:
+                failed_sources.add(file_path)
                 print(f"Cannot read source timestamp {file_path}: {error}")
                 continue
             
             cached_entry = self.cache_manager.get_entry(file_path)
             if (force or not cached_entry or cached_entry.get("mtime") != current_mtime
-                    or cached_entry.get("parser_revision") != PARSER_REVISION):
+                    or cached_entry.get("parser_revision") != PARSER_REVISION
+                    or cached_entry.get("settings_key") != settings_key):
                 files_to_update[file_path] = current_mtime
                 
         # 2. Parallel Processing
@@ -191,11 +247,6 @@ class TaskDispatcher:
             total_updates = len(files_to_update)
             self.ui_cb['set_status'](f"启用多核并发引擎解析 {total_updates} 个变动文件...")
             
-            rules = self.state.get_rules()
-            adv_opts = self.state.get_advanced_options()
-            output_path_base = self.state.get_output_path()
-            logseq_exclude_keys = self.state.get_logseq_exclude_keys()
-
             completed = 0
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 # Map paths to future logic manually to handle cache manager locking
@@ -213,10 +264,11 @@ class TaskDispatcher:
                         # Synchronous cache update
                         old = self.cache_manager.get_outputs_for_file(path)
                         # A concurrent save must not mark old parsed content as current.
-                        self.cache_manager.update_entry(path, files_to_update[path], new_data)
+                        self.cache_manager.update_entry(path, files_to_update[path], new_data, settings_key)
                         dirty_outputs.update(old.keys())
                         dirty_outputs.update(new_data.keys())
                     except Exception as exc:
+                        failed_sources.add(path)
                         print(f'{path} generated an exception: {exc}')
                     
                     completed += 1
@@ -226,11 +278,15 @@ class TaskDispatcher:
         
         self.ui_cb['set_status']("正在清理失效缓存...")
         for file_path in cached_paths:
-            if file_path not in all_source_files or not os.path.exists(file_path):
+            if file_path not in all_source_files or file_path in missing_sources:
                 old = self.cache_manager.get_outputs_for_file(file_path)
                 self.cache_manager.remove_entry(file_path)
                 dirty_outputs.update(old.keys())
 
+        policy_names = self.state.get_blacklist().union(reconcile_names)
+        known_outputs = self.cache_manager.get_output_paths()
+        if policy_names:
+            dirty_outputs.update(path for path in known_outputs if os.path.basename(path) in policy_names)
         dirty_outputs.update(self._failed_exports)
         export_errors = []
         if dirty_outputs:
@@ -242,28 +298,29 @@ class TaskDispatcher:
                 if error:
                     export_errors.append(error)
         
-        # update active outputs state — 根据当前 output_path 过滤
         outputs_map = {}
         current_out = self.state.get_output_path()
         virtual_prefix = "<仅缓存,未设输出目录>"
-        for src in self.cache_manager.get_all_cached_paths():
-            for p in self.cache_manager.get_outputs_for_file(src):
-                basename = os.path.basename(p)
-                if not current_out or current_out == os.getcwd():
-                    # 输出路径未设置，使用虚拟前缀展示
-                    outputs_map[os.path.join(virtual_prefix, basename)] = "多元"
-                elif p.startswith(current_out):
-                    outputs_map[p] = "多元"
-                else:
-                    # 路径与当前输出不匹配，用当前路径重建显示
-                    outputs_map[os.path.join(current_out, basename)] = "多元"
+        for path in known_outputs:
+            if not current_out or current_out == os.getcwd():
+                outputs_map[os.path.join(virtual_prefix, os.path.basename(path))] = "多元"
+            elif self._is_output_path_within_root(path, current_out):
+                outputs_map[path] = "多元"
         self.state.set_active_outputs(outputs_map)
         
-        self.cache_manager.save_cache()
+        cache_error = self._save_cache()
         self.ui_cb['update_lists']()
-        self.ui_cb['set_status'](
-            f"有 {len(export_errors)} 项导出失败。{export_errors[0]}" if export_errors else "准备就绪。"
-        )
+        messages = []
+        if scan_errors:
+            messages.append(f"{len(scan_errors)} 项目录扫描失败。")
+        if failed_sources:
+            retained = sum(self.cache_manager.get_entry(path) is not None for path in failed_sources)
+            messages.append(f"{len(failed_sources)} 个源文件读取失败，其中 {retained} 个沿用旧缓存。")
+        if export_errors:
+            messages.append(f"{len(export_errors)} 项导出失败。{export_errors[0]}")
+        if cache_error:
+            messages.append(cache_error)
+        self.ui_cb['set_status']("扫描结束：" + "".join(messages) if messages else "准备就绪。")
         self.ui_cb['update_progress'](val=0)
 
     def _execute_scan_folder(self, folder_path):
@@ -289,8 +346,11 @@ class TaskDispatcher:
     def _execute_regenerate_output(self, output_path):
         self.ui_cb['set_status'](f"后台更新: {os.path.basename(output_path)}...")
         error = self._update_single_output_file(output_path)
-        self.ui_cb['update_lists']({output_path})
-        self.ui_cb['set_status'](error or f"'{os.path.basename(output_path)}' 更新完成。")
+        cache_error = self._save_cache() if self._export_state_needs_save else ""
+        self.ui_cb['update_lists']()
+        self.ui_cb['set_status'](
+            (error or "") + cache_error or f"'{os.path.basename(output_path)}' 更新完成。"
+        )
 
     def _execute_full_rescan(self):
         self.ui_cb['set_status']("开始全量重建...")
@@ -305,7 +365,7 @@ class TaskDispatcher:
         except Exception as e:
             self.ui_cb['show_error']("清除缓存失败", str(e))
 
-    def _update_cache_for_file(self, path, deleted=False, rules=None, adv_opts=None, output_path_base=None, logseq_exclude_keys=None):
+    def _update_cache_for_file(self, path, deleted=False, rules=None, adv_opts=None, output_path_base=None, logseq_exclude_keys=None, settings_key=None):
         old = self.cache_manager.get_outputs_for_file(path)
         new = {}
         if deleted: self.cache_manager.remove_entry(path)
@@ -326,7 +386,7 @@ class TaskDispatcher:
                 # None is distinct from a valid empty parse result. The batch
                 # caller skips output regeneration, preserving cache and files.
                 return old, None
-            self.cache_manager.update_entry(path, mtime, new)
+            self.cache_manager.update_entry(path, mtime, new, settings_key)
         return old, new
 
     @staticmethod
@@ -376,9 +436,13 @@ class TaskDispatcher:
             self._write_output(output_path)
         except OSError as error:
             message = f"导出 {os.path.basename(output_path)} 失败：{error.strerror or error}"
-            self._failed_exports.add(output_path)
+            if output_path not in self._failed_exports:
+                self._export_state_needs_save = True
+                self._failed_exports.add(output_path)
             return message
-        self._failed_exports.discard(output_path)
+        if output_path in self._failed_exports:
+            self._export_state_needs_save = True
+            self._failed_exports.remove(output_path)
         return None
 
     def _write_output(self, output_path):
@@ -407,9 +471,31 @@ class TaskDispatcher:
         self.state.add_active_output(output_path, "多元")
         selected = self.state.get_output_selection().get(basename, False)
         if selected and basename not in self.state.get_blacklist():
-            atomic_write(output_path, "\n".join(sorted(all_lines)))
+            content = "\n".join(sorted(all_lines))
+            try:
+                with open(output_path, encoding="utf-8") as existing:
+                    if existing.read() == content:
+                        return
+            except (FileNotFoundError, UnicodeDecodeError):
+                pass
+            atomic_write(output_path, content)
         else:
             self._remove_output_file(output_path)
+
+    def delete_active_exports(self, output_root=None):
+        root = self.state.get_output_path() if output_root is None else output_root
+        if not root or root == os.getcwd():
+            return 0, []
+        removed, errors = 0, []
+        for path in self.state.get_active_outputs():
+            if not self._is_output_path_within_root(path, root):
+                continue
+            try:
+                if self._remove_output_file(path):
+                    removed += 1
+            except OSError as error:
+                errors.append(f"{os.path.basename(path)}：{error.strerror or error}")
+        return removed, errors
 
     @staticmethod
     def _remove_output_file(path):
@@ -419,26 +505,34 @@ class TaskDispatcher:
             os.chmod(path, stat.S_IWRITE)
             os.remove(path)
         except FileNotFoundError:
-            pass
+            return False
+        return True
 
     def _get_all_source_files(self):
         paths = set()
-        sources = self.state.get_source_files()
-        for path, data in sources.items():
-            if not data.get("enabled"): continue
-            if is_excluded(path, self.state.get_excluded_paths()): continue
-            if data.get("type") == "folder" and os.path.isdir(path):
-                discovered, scan_failed = scan_markdown(path, self.state.get_excluded_paths())
-                # Preserve known entries when a subtree is temporarily unreadable.
-                if scan_failed:
-                    discovered = {**data.get("files", {}), **discovered}
-                data['files'] = discovered
-                self.state.update_source_file(path, data)
-            source_paths = data.get("files", {}).keys() if data.get("type") == "folder" else (path,)
-            for source_path in source_paths:
-                if is_excluded(source_path, self.state.get_excluded_paths()): continue
-                paths.add(os.path.normcase(os.path.realpath(os.path.abspath(source_path))))
-        return list(paths)
+        errors = []
+        exclusions = self.state.get_excluded_paths()
+        for path, data in self.state.get_source_files().items():
+            if not data.get("enabled") or is_excluded(path, exclusions):
+                continue
+            if data.get("type") != "folder":
+                source_paths = (path,)
+            else:
+                scan = self.state.begin_folder_scan(path)
+                if scan is None:
+                    continue
+                discovered, scan_errors = None, []
+                try:
+                    discovered, scan_errors = scan_markdown(path, exclusions)
+                finally:
+                    source_paths = self.state.finish_folder_scan(
+                        path, scan, discovered, partial=bool(scan_errors)
+                    )
+                errors.extend(scan_errors)
+            paths.update(normalize(source) for source in source_paths if not is_excluded(source, exclusions))
+        for error in errors:
+            print(f"Directory scan error: {error}")
+        return paths, errors
 
     def _get_enabled_event_paths(self, changed_paths):
         exclusions = self.state.get_excluded_paths()
